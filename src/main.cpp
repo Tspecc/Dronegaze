@@ -14,8 +14,10 @@
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
 const char *WIFI_PASSWORD = "ASCEpec@2025";
+IPAddress ip = {192,168,4,1};
+
 const int TCP_PORT = 8000;
-const int EEPROM_SIZE = 512 * 32;
+const int EEPROM_SIZE = 512;
 const int EEPROM_ADDR = 0x0;
 
 // Motor and control constants
@@ -160,6 +162,7 @@ void savePIDToEEPROM()
     EEPROM.put(EEPROM_ADDR, pitchPID);
     EEPROM.put(EEPROM_ADDR + sizeof(PIDController), rollPID);
     EEPROM.put(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID); // ✅ Load yaw PID
+    EEPROM.commit();
     EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) , pitchQuadFilter );
     EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) + sizeof(CascadedFilter), rollQuadFilter );
     EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter), yawQuadFilter );
@@ -172,6 +175,7 @@ void loadPIDFromEEPROM()
     EEPROM.get(EEPROM_ADDR, pitchPID);
     EEPROM.get(EEPROM_ADDR + sizeof(PIDController), rollPID);
     EEPROM.get(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID); // ✅ Load yaw PID
+    delay(100);
     EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) , pitchQuadFilter );
     EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) + sizeof(CascadedFilter), rollQuadFilter );
     EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter), yawQuadFilter );
@@ -765,7 +769,8 @@ void setup()
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     loadPIDFromEEPROM();
-
+    Serial.println(3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter));
+    setCpuFrequencyMhz(240);
     // Initialize ESCs
     escFL.attach();
     escFR.attach();
@@ -789,7 +794,8 @@ void setup()
 
     // Initialize WiFi
     WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.config(ip,ip,{255,255,255,0});
+    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD,1,0,4);
     ArduinoOTA.begin();
     server.begin();
     Serial.println("WiFi AP and TCP server started");
@@ -818,16 +824,6 @@ void setup()
     // Configure Kalman filters
     setupKalmanFilters();
 
-    pitchQuadFilter.setFrequency(10.0);
-    pitchQuadFilter.setQ(0.707);
-
-    rollQuadFilter.setFrequency(10.0);
-    rollQuadFilter.setQ(0.707);
-
-    yawQuadFilter.setFrequency(10.0);
-    yawQuadFilter.setQ(0.707);
-
-
     lastUpdate = millis();
     lastCommandTime = millis();
 
@@ -839,33 +835,44 @@ void setup()
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
-    updatePIDControllers();
 }
 unsigned long last_handle_time;
+unsigned long lastLoopTime; // Track last loop time for watchdog
+unsigned long now;
 // ==================== MAIN LOOP ====================
-void loop()
-{
-    ArduinoOTA.handle(); // Handle OTA updates
-    if(millis()-last_handle_time>=10){
-    checkFailsafe();
-    updateIMU();
-    updatePIDControllers();
-    calculateMotorMix();
-    updateMotorOutputs();
-    handleIncomingData();
-    streamTelemetry();
-    // sendHeartbeat();
+
+void loop() {
+    unsigned long now = millis();
+    ArduinoOTA.handle();
+    // Run at 1 kHz (IMU, PID, motors)
+    static unsigned long lastFastTask = 0;
+    if (now - lastFastTask >= 1) {
+        lastFastTask = now;
+        updateIMU();
+        updatePIDControllers();
+        calculateMotorMix();
+        updateMotorOutputs();
     }
-    static unsigned long lastLoopTime = 0;
-    // Watchdog - restart if system hangs
-    if (millis() - lastLoopTime > 100)
-    {
-        // System might be hanging, but just log it
-        if (millis() - lastLoopTime > 1000)
-        {
-            sendLine("WARNING: Long loop time: " + String(millis() - lastLoopTime) + "ms" + "free heap:" + String(ESP.getFreeHeap()));
-        }
-    last_handle_time = millis();
+
+    // Run at 20 Hz (communication)
+    static unsigned long lastCommTask = 0;
+    if (now - lastCommTask >= 50) {
+        lastCommTask = now;
+        handleIncomingData();
+        streamTelemetry();
+        //sendHeartbeat();
     }
-    lastLoopTime = millis();
+
+    // Check failsafe every 50ms
+    static unsigned long lastFailsafe = 0;
+    if (now - lastFailsafe >= 100) {
+        lastFailsafe = now;
+        checkFailsafe();
+    }
+
+    // Watchdog
+    if (now - lastLoopTime > 1000) {
+        sendLine("WARNING: Long loop time: " + String(now - lastLoopTime) + "ms");
+    }
+    lastLoopTime = now;
 }
