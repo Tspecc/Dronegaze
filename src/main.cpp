@@ -17,7 +17,7 @@ const char *WIFI_PASSWORD = "ASCEpec@2025";
 IPAddress ip = {192,168,4,1};
 
 const int TCP_PORT = 8000;
-const int EEPROM_SIZE = 512;
+const int EEPROM_SIZE = 512*6;
 const int EEPROM_ADDR = 0x0;
 
 // Motor and control constants
@@ -38,12 +38,15 @@ const float rad_to_deg = 180.0 / PI;
 bool failsafe_enable = 1;
 bool isArmed = 0;
 
+bool enableFilters = false; // Enable or disable filters
+bool enableQuadFilters = false;
+
 // ==================== STRUCTURES ====================
 
-CascadedFilter pitchQuadFilter(2, 1000.0, 10.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter rollQuadFilter(2, 1000.0, 10.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter yawQuadFilter(2, 1000.0, 10.0, 0.707, FilterType::LOW_PASS);
-
+CascadedFilter pitchQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
+CascadedFilter rollQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
+CascadedFilter yawQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
+CascadedFilter yawAntiDrift(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
 
 struct PIDController
 {
@@ -156,32 +159,82 @@ uint32_t calculateChecksum(const PIDParams &params)
     sum += (uint32_t)(params.Kd * 1000);
     return sum;
 }
+const uint32_t EEPROM_MAGIC = 0xABCD1234; // Signature to verify EEPROM is initialized
+const int EEPROM_MAGIC_ADDR = EEPROM_ADDR + EEPROM_SIZE - sizeof(uint32_t); // Store it at the end
+double yawQ,pitchQ,rollQ,yawF,pitchF,rollF; 
 
 void savePIDToEEPROM()
 {
+    pitchF = pitchQuadFilter.fre;
+    pitchQ = pitchQuadFilter.getQ();
+
+    rollF= rollQuadFilter.fre;
+    rollQ= rollQuadFilter.getQ();
+
+    yawF=yawQuadFilter.fre;
+    yawQ=yawQuadFilter.getQ();
+
     EEPROM.put(EEPROM_ADDR, pitchPID);
     EEPROM.put(EEPROM_ADDR + sizeof(PIDController), rollPID);
-    EEPROM.put(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID); // ✅ Load yaw PID
+    EEPROM.put(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController), yawQ);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + sizeof(double)+1,  yawF);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController)+ 2*sizeof(double)+1, pitchQ);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + 3*sizeof(double)+1,  pitchF);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController)+ 4*sizeof(double)+1, rollQ);
+    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + 5*sizeof(double)+1,  rollF);
+
+    EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);  // Write the magic number
     EEPROM.commit();
-    EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) , pitchQuadFilter );
-    EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) + sizeof(CascadedFilter), rollQuadFilter );
-    EEPROM.put(EEPROM_ADDR+ 3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter), yawQuadFilter );
-    EEPROM.commit();
-    Serial.println("PID values saved to EEPROM");
+    Serial.println(" PID values saved to EEPROM");
 }
+
 
 void loadPIDFromEEPROM()
 {
+    uint32_t storedMagic = 0;
+    EEPROM.get(EEPROM_MAGIC_ADDR, storedMagic);
+
+    if (storedMagic != EEPROM_MAGIC)
+    {
+    yawQ=0.707;
+    yawF=10.0;
+
+    pitchQ=0.707;
+    pitchF=10.0;
+
+    rollQ=0.707;
+    rollF=10.0;
+  
+        Serial.println("EEPROM not initialized or corrupted. Using defaults.");
+        return; // Don’t load anything; system will use default constructed PIDs
+    }
+
     EEPROM.get(EEPROM_ADDR, pitchPID);
     EEPROM.get(EEPROM_ADDR + sizeof(PIDController), rollPID);
-    EEPROM.get(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID); // ✅ Load yaw PID
-    delay(100);
-    EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) , pitchQuadFilter );
-    EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) + sizeof(CascadedFilter), rollQuadFilter );
-    EEPROM.get(EEPROM_ADDR+ 3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter), yawQuadFilter );
+    EEPROM.get(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController), yawQ);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + sizeof(double)+1,  yawF);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController)+ 2*sizeof(double)+1, pitchQ);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + 3*sizeof(double)+1,  pitchF);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController)+ 4*sizeof(double)+1, rollQ);
+    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + 5*sizeof(double)+1,  rollF);
+
     pitchPID.reset();
     rollPID.reset();
-    yawPID.reset(); // ✅ Reset yaw PID
+    yawPID.reset();
+
+    pitchQuadFilter.setFrequency(pitchF);
+    pitchQuadFilter.setQ(pitchQ);
+
+    rollQuadFilter.setFrequency(rollF);
+    rollQuadFilter.setQ(rollQ);
+
+    yawQuadFilter.setFrequency(yawF);
+    yawQuadFilter.setQ(yawQ);
+
+
+
     Serial.println("PID values loaded from EEPROM");
 }
 
@@ -229,11 +282,18 @@ void handleCommand(const String &cmd)
         sendLine("Pitch PID: Kp=" + String(pitchPID.Kp, 3) + " Ki=" + String(pitchPID.Ki, 3) + " Kd=" + String(pitchPID.Kd, 3));
         sendLine("Roll  PID: Kp=" + String(rollPID.Kp, 3) + " Ki=" + String(rollPID.Ki, 3) + " Kd=" + String(rollPID.Kd, 3));
         sendLine("Yaw   PID: Kp=" + String(yawPID.Kp, 3) + " Ki=" + String(yawPID.Ki, 3) + " Kd=" + String(yawPID.Kd, 3)); // ✅ Show yaw PID
+        sendLine("PITCH_FILTER " + String(pitchQuadFilter.getQ(), 3) + " " + String(pitchQuadFilter.fre, 3));
+        sendLine("ROLL_FILTER " + String(rollQuadFilter.getQ(), 3) + " " + String(rollQuadFilter.fre, 3));
+        sendLine("YAW_FILTER " + String(yawQuadFilter.getQ(), 3) + " " + String(yawQuadFilter.fre, 3));
         sendLine("System: " + String(millis()) + "ms uptime");
         sendLine("Last Command: " + String(millis() - lastCommandTime) + "ms ago");
         sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "°"); // ✅ Show yaw setpoint
     }else
     if(trimmed == "failsafe on"){failsafe_enable=1; sendLine("Enabled failsafe mode");}else if (trimmed == "failsafe off"){failsafe_enable=0; sendLine("Disabled failsafe mode");}
+    else if(trimmed == "filters on"){enableFilters = true; sendLine("Enabled filters");}
+    else if(trimmed == "filters off"){enableFilters = false; sendLine("Disabled filters");}
+    else if(trimmed == "quadfilters on"){enableQuadFilters = true; sendLine("Enabled quad filters");}
+    else if(trimmed == "quadfilters off"){enableQuadFilters = false; sendLine("Disabled quad filters");}
     else if (trimmed == "save")
     {
         savePIDToEEPROM();
@@ -244,6 +304,9 @@ void handleCommand(const String &cmd)
         pitchPID.reset();
         rollPID.reset();
         yawPID.reset(); // ✅ Reset yaw PID
+        yawQuadFilter.reset();
+        rollQuadFilter.reset();
+        pitchQuadFilter.reset();
         sendLine("ACK: PID controllers reset");
     }
     else if (trimmed == "telemetry on")
@@ -376,7 +439,7 @@ void handleCommand(const String &cmd)
         {
             String axis = trimmed.substring(10, firstSpace);
             String param = trimmed.substring(firstSpace + 1, secondSpace);
-            float value = trimmed.substring(secondSpace + 1).toFloat();
+            double value = trimmed.substring(secondSpace + 1).toDouble();
 
             CascadedFilter *filter = nullptr;
             if (axis == "pitch")
@@ -402,6 +465,14 @@ void handleCommand(const String &cmd)
                 {
                     sendLine("ERROR: Invalid filter parameter. Use freq or q");
                 }
+                pitchF=pitchQuadFilter.fre;
+                pitchQ=pitchQuadFilter.getQ();
+
+                rollF=rollQuadFilter.fre;
+                rollQ=rollQuadFilter.getQ();
+
+                yawF=yawQuadFilter.fre;
+                yawQ=yawQuadFilter.getQ();
             }
             else
             {
@@ -611,17 +682,26 @@ void checkFailsafe()
 }
 
 // ==================== IMU FUNCTIONS ====================
+double filteredRoll ;
+double filteredPitch;
+double filteredYaw  ;
+
+unsigned long lastIMUVerbose;
 void updateIMU()
 {
     int16_t ax, ay, az, gx, gy, gz;
+
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+
     unsigned long now = millis();
+
     float dt = (now - lastUpdate) / 1000.0;
     if (dt <= 0 || dt > 0.1)
     {
         lastUpdate = now;
         return;
     }
+
     lastUpdate = now;
 
     float rollAcc = atan2(ay, az) * RAD_TO_DEG;
@@ -630,19 +710,34 @@ void updateIMU()
     float gyroYrate = gy / GYRO_SCALE;
     float gyroZrate = gz / GYRO_SCALE;
 
-double filteredRoll = kalmanX.update(rollAcc, gyroXrate, dt);
-double filteredPitch = kalmanY.update(pitchAcc, gyroYrate, dt);
-double filteredYaw = kalmanZ.update(yaw, gyroZrate, dt);
+if(enableFilters){
+ filteredRoll  = rollFilter.update(kalmanX.update(rollAcc, gyroXrate, dt));
+ filteredPitch = pitchFilter.update(kalmanY.update(pitchAcc, gyroYrate, dt));
+ filteredYaw   = yawFilter.update(kalmanZ.update(yaw, gyroZrate, dt));
+}else
+{
+filteredRoll = kalmanX.update(rollAcc, gyroXrate, dt);
+filteredPitch = kalmanY.update(pitchAcc, gyroYrate, dt);
+filteredYaw = kalmanZ.update(yaw, gyroZrate, dt);
+}
 
+if(enableQuadFilters){
 roll = rollQuadFilter.process(filteredRoll);
 pitch = pitchQuadFilter.process(filteredPitch);
 yaw = yawQuadFilter.process(filteredYaw);
+}else
+{
+roll = filteredRoll;
+pitch = filteredPitch;
+yaw = yawAntiDrift.process(filteredYaw); // Use yawAntiDrift filter for yaw
+}
 
     // Keep yaw within -180 to 180 degrees
     if (yaw > 180)
         yaw -= 360;
     else if (yaw < -180)
         yaw += 360;
+
 }
 
 void updatePIDControllers()
@@ -663,11 +758,11 @@ void updatePIDControllers()
     lastPIDUpdate = now;
 
     // Rate-limited debug timing
-    bool shouldDebug = (now - lastDebugPrint) >= DEBUG_INTERVAL;
-    if (shouldDebug)
-    {
-        Serial.println("DEBUG: PID dt = " + String(dt, 6));
-    }
+    // bool shouldDebug = (now - lastDebugPrint) >= DEBUG_INTERVAL;
+    // if (shouldDebug)
+    // {
+    //     Serial.println("DEBUG: PID dt = " + String(dt, 6));
+    // }
 
     // Prevent invalid dt
     if (dt <= 0 || dt > 0.1)
@@ -676,7 +771,7 @@ void updatePIDControllers()
         static unsigned long lastDtError = 0;
         if (now - lastDtError > 1000)
         {
-            Serial.println("DEBUG: Invalid dt detected: " + String(dt, 6));
+            // Serial.println("DEBUG: Invalid dt detected: " + String(dt, 6));
             lastDtError = now;
         }
         return;
@@ -691,27 +786,28 @@ void updatePIDControllers()
     // if (yawError > 180) yawError -= 360; //not for the time being. . .
     // else if (yawError < -180) yawError += 360;
 
-    rollCorrection = rollPID.compute(rollError, dt);
+    rollCorrection =  rollPID.compute(rollError, dt);
     pitchCorrection = pitchPID.compute(pitchError, dt);
-    yawCorrection = yawPID.compute(yawError, dt); // ✅ Compute yaw correction
+    yawCorrection = yawPID.compute(yawError, dt);
+
 
     // Rate-limited debug output
-    if (shouldDebug)
-    {
-        Serial.println("DEBUG: pitch=" + String(pitch, 2) + " err=" + String(pitchError, 2) +
-                       " corr=" + String(pitchCorrection, 2));
-        Serial.println("DEBUG: roll=" + String(roll, 2) + " err=" + String(rollError, 2) +
-                       " corr=" + String(rollCorrection, 2));
-        Serial.println("DEBUG: yaw=" + String(yaw, 2) + " setpoint=" + String(yawSetpoint, 2) +
-                       " err=" + String(yawError, 2) + " corr=" + String(yawCorrection, 2)); // ✅ Debug yaw
-        Serial.println("DEBUG: Pitch PID - Kp:" + String(pitchPID.Kp, 2) +
-                       " Ki:" + String(pitchPID.Ki, 3) +
-                       " Kd:" + String(pitchPID.Kd, 2));
-        Serial.println("DEBUG: Yaw PID - Kp:" + String(yawPID.Kp, 2) +
-                       " Ki:" + String(yawPID.Ki, 3) +
-                       " Kd:" + String(yawPID.Kd, 2)); // ✅ Debug yaw PID
-        lastDebugPrint = now;
-    }
+    // if (shouldDebug)
+    // {
+    //     Serial.println("DEBUG: pitch=" + String(pitch, 2) + " err=" + String(pitchError, 2) +
+    //                    " corr=" + String(pitchCorrection, 2));
+    //     Serial.println("DEBUG: roll=" + String(roll, 2) + " err=" + String(rollError, 2) +
+    //                    " corr=" + String(rollCorrection, 2));
+    //     Serial.println("DEBUG: yaw=" + String(yaw, 2) + " setpoint=" + String(yawSetpoint, 2) +
+    //                    " err=" + String(yawError, 2) + " corr=" + String(yawCorrection, 2)); // ✅ Debug yaw
+    //     Serial.println("DEBUG: Pitch PID - Kp:" + String(pitchPID.Kp, 2) +
+    //                    " Ki:" + String(pitchPID.Ki, 3) +
+    //                    " Kd:" + String(pitchPID.Kd, 2));
+    //     Serial.println("DEBUG: Yaw PID - Kp:" + String(yawPID.Kp, 2) +
+    //                    " Ki:" + String(yawPID.Ki, 3) +
+    //                    " Kd:" + String(yawPID.Kd, 2)); // ✅ Debug yaw PID
+    //     lastDebugPrint = now;
+    // }
 
     // NaN errors should be immediate but rate-limited
     if (isnan(pitchCorrection) || isnan(rollCorrection) || isnan(yawCorrection))
@@ -730,15 +826,15 @@ void updatePIDControllers()
 
 void setupKalmanFilters()
 {
-    kalmanX.Q_angle = 0.001f;
-    kalmanX.Q_bias = 0.003f;
-    kalmanX.R_measure = 0.03f;
-    kalmanY.Q_angle = 0.001f;
-    kalmanY.Q_bias = 0.003f;
-    kalmanY.R_measure = 0.03f;
-    kalmanZ.Q_angle = 0.005f; // tuned for yaw (gyro-only, no accel ref)
-    kalmanZ.Q_bias = 0.003f;
-    kalmanZ.R_measure = 0.05f;
+    kalmanX.Q_angle = 0.01f;
+    kalmanX.Q_bias = 0.006f;
+    kalmanX.R_measure = 0.1f;
+    kalmanY.Q_angle = 0.01f;
+    kalmanY.Q_bias = 0.006f;
+    kalmanY.R_measure = 0.05f;
+    kalmanZ.Q_angle = 0.01f; // tuned for yaw (gyro-only, no accel ref)
+    kalmanZ.Q_bias = 0.006f;
+    kalmanZ.R_measure = 0.1f;
 
     Serial.println("Priming Kalman filters...");
     for (int i = 0; i < 100; i++)
@@ -761,6 +857,39 @@ void setupKalmanFilters()
 }
 
 // ==================== SETUP ====================
+
+void FastTask(void *pvParameters) {
+    while (true) {
+        updateIMU();
+        updatePIDControllers();
+        calculateMotorMix();
+        updateMotorOutputs();
+        vTaskDelay(pdMS_TO_TICKS(10)); // ~100 Hz (adjust to 1 kHz if needed)
+    }
+}
+
+void CommTask(void *pvParameters) {
+    while (true) {
+        handleIncomingData();
+        streamTelemetry();
+        vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
+    }
+}
+
+void FailsafeTask(void *pvParameters) {
+    while (true) {
+        checkFailsafe();
+        vTaskDelay(pdMS_TO_TICKS(10)); // ~10 Hz
+    }
+}
+
+void OTATask(void *pvParameters) {
+    while (true) {
+        ArduinoOTA.handle();  // OTA can be run slowly
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -769,7 +898,7 @@ void setup()
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     loadPIDFromEEPROM();
-    Serial.println(3 * sizeof(PIDController) + 2 * sizeof(CascadedFilter));
+    Serial.println(3 * sizeof(PIDController) + 3 * sizeof(CascadedFilter));
     setCpuFrequencyMhz(240);
     // Initialize ESCs
     escFL.attach();
@@ -835,44 +964,51 @@ void setup()
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
+    updatePIDControllers();
+
+ xTaskCreatePinnedToCore(
+        FastTask,        // Task function
+        "FastTask",      // Name
+        4096,            // Stack size
+        NULL,            // Parameters
+        3,               // Priority
+        NULL,            // Task handle
+        1                // Core 1 (runs app code)
+    );
+
+    xTaskCreatePinnedToCore(
+        CommTask,
+        "CommTask",
+        8192,
+        NULL,
+        2,
+        NULL,
+        1 // Core 0 — use Core 0 for Wi-Fi tasks to avoid conflicts
+    );
+
+    xTaskCreatePinnedToCore(
+        FailsafeTask,
+        "FailsafeTask",
+        2048,
+        NULL,
+        1,
+        NULL,
+        1
+    );
+
+    xTaskCreatePinnedToCore(
+        OTATask,
+        "OTATask",
+        2048,
+        NULL,
+        1,
+        NULL,
+        0
+    );
+
 }
-unsigned long last_handle_time;
-unsigned long lastLoopTime; // Track last loop time for watchdog
-unsigned long now;
 // ==================== MAIN LOOP ====================
 
 void loop() {
-    unsigned long now = millis();
-    ArduinoOTA.handle();
-    // Run at 1 kHz (IMU, PID, motors)
-    static unsigned long lastFastTask = 0;
-    if (now - lastFastTask >= 1) {
-        lastFastTask = now;
-        updateIMU();
-        updatePIDControllers();
-        calculateMotorMix();
-        updateMotorOutputs();
-    }
-
-    // Run at 20 Hz (communication)
-    static unsigned long lastCommTask = 0;
-    if (now - lastCommTask >= 50) {
-        lastCommTask = now;
-        handleIncomingData();
-        streamTelemetry();
-        //sendHeartbeat();
-    }
-
-    // Check failsafe every 50ms
-    static unsigned long lastFailsafe = 0;
-    if (now - lastFailsafe >= 100) {
-        lastFailsafe = now;
-        checkFailsafe();
-    }
-
-    // Watchdog
-    if (now - lastLoopTime > 1000) {
-        sendLine("WARNING: Long loop time: " + String(now - lastLoopTime) + "ms");
-    }
-    lastLoopTime = now;
+    vTaskDelete(NULL); // Kill the default task
 }

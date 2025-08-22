@@ -379,13 +379,13 @@ private:
 public:
     CascadedFilter(int numStages, double sampleRate = 44100.0, 
                    double frequency = 1000.0, double Q = 0.707, 
-                   FilterType type = FilterType::LOW_PASS) {
+                   FilterType type = FilterType::LOW_PASS) {         
         stages.resize(numStages);
         for (int i = 0; i < numStages; ++i) {
             stages[i] = BiquadFilter(sampleRate, frequency, Q, type);
         }
     }
-    
+
     double process(double input) {
         double output = input;
         for (size_t i = 0; i < stages.size(); ++i) {
@@ -401,7 +401,15 @@ public:
         }
     }
     
+    double fre=0;
+
+    void setF(double fr)
+    {
+        fre = fr;
+    }
+
     void setFrequency(double freq) {
+        setF(freq);
         for (size_t i = 0; i < stages.size(); ++i) {
             stages[i].setFrequency(freq);
         }
@@ -412,6 +420,16 @@ public:
             stages[i].setQ(q);
         }
     }
+
+    double getQ()
+    {
+        return stages[0].getQ();
+    }
+
+    double getFrequency()
+    {
+         return stages[0].getFrequency();
+    }
     
 
     void reset() {
@@ -421,6 +439,7 @@ public:
     }
     
     size_t getStageCount() const { return stages.size(); }
+
 };
 
   
