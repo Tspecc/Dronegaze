@@ -907,7 +907,7 @@ void OTATask(void *pvParameters) {
 }
 
 void setupWiFi() {
-    WiFi.mode(WIFI_AP);
+    WiFi.mode(WIFI_AP_STA);
 
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
 
@@ -941,11 +941,16 @@ void setup()
     escFR.attach();
     escBL.attach();
     escBR.attach();
+    escFL.arm(2000);
+    escFR.arm(2000);
+    escBL.arm(2000);
+    escBR.arm(2000);
+    delay(200);
     escFL.arm(1000);
     escFR.arm(1000);
     escBL.arm(1000);
     escBR.arm(1000);
-    delay(500);
+    //to recalibrate the motors because I sort of noticed that there's some jitter in their behaviours...
     setupWiFi();
 
     // Initialize ESP-NOW
