@@ -13,7 +13,9 @@
 
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
+
 #define CONFIG_IDF_TARGET_ESP32C3
+
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // ESP32-C3 Super Mini (RISC-V single core)
 const int PIN_MFL = 20; // MTL
@@ -22,6 +24,9 @@ const int PIN_MBL = 21; // MBL
 const int PIN_MBR = 9;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;
+
+const int PWM_RESOLUTION = 14;
+
 // Reduced stack sizes for smaller RAM
 const uint16_t FAST_TASK_STACK = 2048;
 const uint16_t COMM_TASK_STACK = 4096;
@@ -36,6 +41,9 @@ const int PIN_MBL = 26;
 const int PIN_MBR = 25;
 const int BUZZER_PIN = -1; // No buzzer by default
 const uint32_t CPU_FREQ_MHZ = 240;
+
+const int PWM_RESOLUTION = 16;
+
 const uint16_t FAST_TASK_STACK = 4096;
 const uint16_t COMM_TASK_STACK = 8192;
 const uint16_t FAILSAFE_TASK_STACK = 2048;
@@ -46,8 +54,6 @@ const uint16_t OTA_TASK_STACK = 2048;
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
 const char *WIFI_PASSWORD = "ASCEpec@2025";
-IPAddress ip = {192,168,4,1};
-
 const int TCP_PORT = 8000;
 const int EEPROM_SIZE = 512*6;
 const int EEPROM_ADDR = 0x0;
@@ -155,7 +161,10 @@ struct MotorOutputs
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
-ESC escFL(PIN_MFL, 0), escFR(PIN_MFR, 1), escBL(PIN_MBL, 2), escBR(PIN_MBR, 3);
+ESC escFL(PIN_MFL, 0, 50, PWM_RESOLUTION),
+    escFR(PIN_MFR, 1, 50, PWM_RESOLUTION),
+    escBL(PIN_MBL, 2, 50, PWM_RESOLUTION),
+    escBR(PIN_MBR, 3, 50, PWM_RESOLUTION);
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 KalmanFilter kalmanX, kalmanY, kalmanZ;
@@ -897,6 +906,26 @@ void OTATask(void *pvParameters) {
     }
 }
 
+void setupWiFi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.print("Connecting to WiFi");
+    uint8_t retries = 0;
+    while (WiFi.status() != WL_CONNECTED && retries < 20) {
+        delay(500);
+        Serial.print(".");
+        retries++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.print("\nWiFi connected, IP: ");
+        Serial.println(WiFi.localIP());
+        ArduinoOTA.begin();
+        server.begin();
+    } else {
+        Serial.println("\nWiFi connection failed");
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -908,6 +937,13 @@ void setup()
         delay(200);
        tone(BUZZER_PIN, 0);
     } //50:78:7D:45:D9:F0 new mac
+
+    if (BUZZER_PIN >= 0) {
+        pinMode(BUZZER_PIN, OUTPUT);
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+    }
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
@@ -924,18 +960,13 @@ void setup()
     escBL.arm();
     escBR.arm();
 
-    // Initialize WiFi
 
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.config(ip,ip,{255,255,255,0});
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD,1,0,4);
+    setupWiFi();
+
     ArduinoOTA.begin();
-    server.begin();
-    Serial.println("WiFi AP and TCP server started");
-    Serial.print("AP IP address: ");
-    Serial.println(WiFi.softAPIP());
     Serial.print("mac Address:");
     Serial.println(WiFi.macAddress());
+
 
     // Initialize ESP-NOW
     if (esp_now_init() != ESP_OK)
