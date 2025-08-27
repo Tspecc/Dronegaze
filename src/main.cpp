@@ -13,15 +13,20 @@
 
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
+
+#define CONFIG_IDF_TARGET_ESP32C3
+
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // ESP32-C3 Super Mini (RISC-V single core)
-const int PIN_MFL = 20; // MTL
-const int PIN_MFR = 10; // MTR
-const int PIN_MBL = 21; // MBL
-const int PIN_MBR = 9;  // MBR
+const int PIN_MFL = 1; // MTL
+const int PIN_MFR = 2; // MTR
+const int PIN_MBL = 0; // MBL
+const int PIN_MBR = 3;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;
+
 const int PWM_RESOLUTION = 14;
+
 // Reduced stack sizes for smaller RAM
 const uint16_t FAST_TASK_STACK = 2048;
 const uint16_t COMM_TASK_STACK = 4096;
@@ -154,10 +159,12 @@ struct MotorOutputs
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
+
 ESC escFL(PIN_MFL, 0, 50, PWM_RESOLUTION),
     escFR(PIN_MFR, 1, 50, PWM_RESOLUTION),
     escBL(PIN_MBL, 2, 50, PWM_RESOLUTION),
     escBR(PIN_MBR, 3, 50, PWM_RESOLUTION);
+
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 KalmanFilter kalmanX, kalmanY, kalmanZ;
@@ -791,13 +798,6 @@ void updatePIDControllers()
     float dt = (now - lastPIDUpdate) / 1000.0;
     lastPIDUpdate = now;
 
-    // Rate-limited debug timing
-    // bool shouldDebug = (now - lastDebugPrint) >= DEBUG_INTERVAL;
-    // if (shouldDebug)
-    // {
-    //     Serial.println("DEBUG: PID dt = " + String(dt, 6));
-    // }
-
     // Prevent invalid dt
     if (dt <= 0 || dt > 0.1)
     {
@@ -817,31 +817,13 @@ void updatePIDControllers()
     // ✅ Calculate yaw error with wrap-around handling
     float yawError = yawSetpoint - yaw;
     // Handle wrap-around for yaw error
-    // if (yawError > 180) yawError -= 360; //not for the time being. . .
-    // else if (yawError < -180) yawError += 360;
+     if (yawError > 180) yawError -= 360; //not for the time being. . .
+     else if (yawError < -180) yawError += 360;
 
     rollCorrection =  rollPID.compute(rollError, dt);
     pitchCorrection = pitchPID.compute(pitchError, dt);
     yawCorrection = yawPID.compute(yawError, dt);
 
-
-    // Rate-limited debug output
-    // if (shouldDebug)
-    // {
-    //     Serial.println("DEBUG: pitch=" + String(pitch, 2) + " err=" + String(pitchError, 2) +
-    //                    " corr=" + String(pitchCorrection, 2));
-    //     Serial.println("DEBUG: roll=" + String(roll, 2) + " err=" + String(rollError, 2) +
-    //                    " corr=" + String(rollCorrection, 2));
-    //     Serial.println("DEBUG: yaw=" + String(yaw, 2) + " setpoint=" + String(yawSetpoint, 2) +
-    //                    " err=" + String(yawError, 2) + " corr=" + String(yawCorrection, 2)); // ✅ Debug yaw
-    //     Serial.println("DEBUG: Pitch PID - Kp:" + String(pitchPID.Kp, 2) +
-    //                    " Ki:" + String(pitchPID.Ki, 3) +
-    //                    " Kd:" + String(pitchPID.Kd, 2));
-    //     Serial.println("DEBUG: Yaw PID - Kp:" + String(yawPID.Kp, 2) +
-    //                    " Ki:" + String(yawPID.Ki, 3) +
-    //                    " Kd:" + String(yawPID.Kd, 2)); // ✅ Debug yaw PID
-    //     lastDebugPrint = now;
-    // }
 
     // NaN errors should be immediate but rate-limited
     if (isnan(pitchCorrection) || isnan(rollCorrection) || isnan(yawCorrection))
@@ -926,6 +908,9 @@ void OTATask(void *pvParameters) {
 
 void setupWiFi() {
     WiFi.mode(WIFI_AP);
+
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Access Point started, IP: ");
     Serial.println(WiFi.softAPIP());
@@ -937,6 +922,14 @@ void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
+    delay(1000);
+    if (BUZZER_PIN >= 0) {
+       tone(BUZZER_PIN, 1000);
+        delay(200);
+         tone(BUZZER_PIN, 1180);
+         delay(200);
+       noTone(BUZZER_PIN);
+    } //50:78:7D:45:D9:F0 new mac
 
     if (BUZZER_PIN >= 0) {
         pinMode(BUZZER_PIN, OUTPUT);
@@ -959,17 +952,6 @@ void setup()
     escFR.arm();
     escBL.arm();
     escBR.arm();
-    // delay(1000);
-    // escFL.writeMicroseconds(2000);
-    // escFR.writeMicroseconds(2000);
-    // escBL.writeMicroseconds(2000);
-    // escBR.writeMicroseconds(2000);
-    // delay(10);
-    // escFL.writeMicroseconds(1000);
-    // escFR.writeMicroseconds(1000);
-    // escBL.writeMicroseconds(1000);
-    // escBR.writeMicroseconds(1000);
-    // delay(2000);
 
     setupWiFi();
 
