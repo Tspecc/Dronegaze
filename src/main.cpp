@@ -11,6 +11,37 @@
 #include <EEPROM.h>
 #include "QuadFilter.h"
 
+// ==================== BOARD CONFIGURATION ====================
+// Select pin mappings and task sizes based on target board
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+// ESP32-C3 Super Mini (RISC-V single core)
+const int PIN_MFL = 20; // MTL
+const int PIN_MFR = 10; // MTR
+const int PIN_MBL = 21; // MBL
+const int PIN_MBR = 9;  // MBR
+const int BUZZER_PIN = 6;
+const uint32_t CPU_FREQ_MHZ = 160;
+// Reduced stack sizes for smaller RAM
+const uint16_t FAST_TASK_STACK = 2048;
+const uint16_t COMM_TASK_STACK = 4096;
+const uint16_t FAILSAFE_TASK_STACK = 2048;
+const uint16_t OTA_TASK_STACK = 2048;
+#define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
+#else
+// Default ESP32 (e.g., NodeMCU-32S)
+const int PIN_MFL = 14;
+const int PIN_MFR = 27;
+const int PIN_MBL = 26;
+const int PIN_MBR = 25;
+const int BUZZER_PIN = -1; // No buzzer by default
+const uint32_t CPU_FREQ_MHZ = 240;
+const uint16_t FAST_TASK_STACK = 4096;
+const uint16_t COMM_TASK_STACK = 8192;
+const uint16_t FAILSAFE_TASK_STACK = 2048;
+const uint16_t OTA_TASK_STACK = 2048;
+#define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
+#endif
+
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
 const char *WIFI_PASSWORD = "ASCEpec@2025";
@@ -123,7 +154,7 @@ struct MotorOutputs
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
-ESC escFL(14, 0), escFR(27, 1), escBL(26, 2), escBR(25, 3);
+ESC escFL(PIN_MFL, 0), escFR(PIN_MFR, 1), escBL(PIN_MBL, 2), escBR(PIN_MBR, 3);
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 KalmanFilter kalmanX, kalmanY, kalmanZ;
@@ -895,11 +926,18 @@ void setup()
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
 
+    if (BUZZER_PIN >= 0) {
+        pinMode(BUZZER_PIN, OUTPUT);
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+    }
+
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     loadPIDFromEEPROM();
     Serial.println(3 * sizeof(PIDController) + 3 * sizeof(CascadedFilter));
-    setCpuFrequencyMhz(240);
+    setCpuFrequencyMhz(CPU_FREQ_MHZ);
     // Initialize ESCs
     escFL.attach();
     escFR.attach();
@@ -966,41 +1004,37 @@ void setup()
     yawPID.reset(); // ✅ Reset yaw PID
     updatePIDControllers();
 
- xTaskCreatePinnedToCore(
-        FastTask,        // Task function
-        "FastTask",      // Name
-        4096,            // Stack size
-        NULL,            // Parameters
-        3,               // Priority
-        NULL,            // Task handle
-        1                // Core 1 (runs app code)
+    CREATE_TASK(
+        FastTask,
+        "FastTask",
+        FAST_TASK_STACK,
+        3,
+        NULL,
+        1
     );
 
-    xTaskCreatePinnedToCore(
+    CREATE_TASK(
         CommTask,
         "CommTask",
-        8192,
-        NULL,
+        COMM_TASK_STACK,
         2,
         NULL,
         1 // Core 0 — use Core 0 for Wi-Fi tasks to avoid conflicts
     );
 
-    xTaskCreatePinnedToCore(
+    CREATE_TASK(
         FailsafeTask,
         "FailsafeTask",
-        2048,
-        NULL,
+        FAILSAFE_TASK_STACK,
         1,
         NULL,
         1
     );
 
-    xTaskCreatePinnedToCore(
+    CREATE_TASK(
         OTATask,
         "OTATask",
-        2048,
-        NULL,
+        OTA_TASK_STACK,
         1,
         NULL,
         0
