@@ -61,11 +61,13 @@ const int MOTOR_MIN = 1000;
 const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
-const int BIAS_LIMIT = 100;
+const int THROTTLE_HOVER = (THROTTLE_MIN + THROTTLE_MAX) / 2;
+const int THROTTLE_DEADBAND = 20;
 const int CORRECTION_LIMIT = 150;
-const int EASING_RATE = 50;
+const int EASING_RATE = 2000; // respond almost instantly
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
+const float ALTITUDE_ACC_GAIN = 20.0f; // throttle units per m/s^2
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
@@ -79,10 +81,10 @@ bool enableQuadFilters = false;
 
 // ==================== STRUCTURES ====================
 
-CascadedFilter pitchQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter rollQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter yawQuadFilter(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter yawAntiDrift(1, 100.0, 10.0, 0.707, FilterType::LOW_PASS);
+// use higher cutoff frequencies for more responsive filtering
+CascadedFilter pitchQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
+CascadedFilter rollQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
+CascadedFilter yawQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
 
 struct PIDController
 {
@@ -132,14 +134,15 @@ struct PIDController
     }
 };
 
+// Command packet now carries absolute angle targets instead of biases
 struct ThrustCommand
 {
-    uint16_t throttle;
-    int8_t pitchBias;
-    int8_t rollBias;
-    int8_t yawBias;
+    uint16_t throttle;    // Base throttle command
+    int8_t pitchAngle;    // Desired pitch angle in degrees
+    int8_t rollAngle;     // Desired roll angle in degrees
+    int8_t yawAngle;      // Desired yaw heading in degrees
     bool arm_motors;
-}; //dummy packet
+};
 
 struct MotorOutputs
 {
@@ -168,15 +171,20 @@ ESC escFL(PIN_MFL, 0, 50, PWM_RESOLUTION),
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 KalmanFilter kalmanX, kalmanY, kalmanZ;
-BandPass pitchFilter(0.01, 0.98);
-BandPass rollFilter(0.01, 0.98);
-BandPass yawFilter(0.01, 0.98); // ✅ Add yaw filter
+// lighten bandpass filtering for faster response
+BandPass pitchFilter(0.1, 0.9);
+BandPass rollFilter(0.1, 0.9);
+BandPass yawFilter(0.1, 0.9); // ✅ Add yaw filter
 PIDController pitchPID, rollPID, yawPID;
+PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
 ThrustCommand command = {THROTTLE_MIN, 0, 0, 0};
 MotorOutputs currentOutputs, targetOutputs;
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
-float yawSetpoint = 0; // ✅ Add yaw setpoint for heading hold
+float altitudeCorrection = 0;
+float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
+float altitude = 0, altitudeSetpoint = 0, verticalVelocity = 0, verticalAcc = 0;
+float pitchOffset = 0, rollOffset = 0, yawOffset = 0; // offsets for IMU zeroing
 unsigned long lastUpdate = 0;
 unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
@@ -542,11 +550,12 @@ void streamTelemetry()
     {
         lastTelemetry = millis();
 
-        // Enhanced telemetry with yaw data
+        // Enhanced telemetry with yaw data and altitude
         String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
                            String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
-                           String(command.throttle) + " " + String(command.pitchBias) + " " +
-                           String(command.rollBias) + " " + String(command.yawBias) + " " + String(millis() - lastCommandTime);
+                           String(command.throttle) + " " + String(command.pitchAngle) + " " +
+                           String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(altitude, 2) + " " +
+                           String(millis() - lastCommandTime);
         sendLine(telemetry);
     }
 }
@@ -624,15 +633,15 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         memcpy(&command, incomingData, sizeof(ThrustCommand));
         lastCommandTime = millis();
 
-        // ✅ Update yaw setpoint when yaw bias is applied
-        if (command.yawBias > 15 || command.yawBias < -15)
+        // Update angle setpoints from command
+        pitchSetpoint = command.pitchAngle;
+        rollSetpoint = command.rollAngle;
+        yawSetpoint = command.yawAngle;
+
+        int throttleDelta = command.throttle - THROTTLE_HOVER;
+        if (abs(throttleDelta) > THROTTLE_DEADBAND)
         {
-            yawSetpoint += command.yawBias * 0.05; // Adjust rate as needed
-            // Keep yaw setpoint within -180 to 180 degrees
-            if (yawSetpoint > 180)
-                yawSetpoint -= 360;
-            else if (yawSetpoint < -180)
-                yawSetpoint += 360;
+            altitudeSetpoint += throttleDelta * 0.01f;
         }
     }
 }
@@ -676,20 +685,17 @@ void updateMotorOutputs()
 
 void calculateMotorMix()
 {
-    int base = command.throttle;
-    int pitchBias = constrain(command.pitchBias, -BIAS_LIMIT, BIAS_LIMIT);
-    int rollBias = constrain(command.rollBias, -BIAS_LIMIT, BIAS_LIMIT);
+    int base = THROTTLE_HOVER + altitudeCorrection; // apply altitude hold correction
 
     int pitchCorr = constrain(pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
     int rollCorr = constrain(rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-    int yawCorr = constrain(yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT); // ✅ Add yaw correction
+    int yawCorr = constrain(yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
 
-    // ✅ Standard quadcopter mixing with yaw control
-    // Yaw is controlled by differential thrust between CW and CCW motor pairs
-    targetOutputs.MFL = base - pitchCorr + rollCorr - pitchBias + rollBias - yawCorr; // CCW motor
-    targetOutputs.MFR = base - pitchCorr - rollCorr - pitchBias - rollBias + yawCorr; // CW motor
-    targetOutputs.MBL = base + pitchCorr + rollCorr + pitchBias + rollBias - yawCorr; // CCW motor
-    targetOutputs.MBR = base + pitchCorr - rollCorr + pitchBias - rollBias + yawCorr; // CW motor
+    // Standard quadcopter mixing using angle corrections
+    targetOutputs.MFL = base - pitchCorr + rollCorr - yawCorr; // CCW motor
+    targetOutputs.MFR = base - pitchCorr - rollCorr + yawCorr; // CW motor
+    targetOutputs.MBL = base + pitchCorr + rollCorr - yawCorr; // CCW motor
+    targetOutputs.MBR = base + pitchCorr - rollCorr + yawCorr; // CW motor
 
     targetOutputs.constrainAll();
 }
@@ -703,9 +709,11 @@ void checkFailsafe()
         if (millis() - lastCommandTime > FAILSAFE_TIMEOUT)
         {
             command.throttle = THROTTLE_MIN;
-            command.pitchBias = 0;
-            command.rollBias = 0;
-            command.yawBias = 0; // ✅ Reset yaw bias in failsafe
+            command.pitchAngle = 0;
+            command.rollAngle = 0;
+            command.yawAngle = yaw; // hold current yaw on failsafe
+            pitchSetpoint = rollSetpoint = 0;
+            yawSetpoint = yaw;
 
             // Emergency stop
             targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
@@ -770,8 +778,13 @@ yaw = yawQuadFilter.process(filteredYaw);
 {
 roll = filteredRoll;
 pitch = filteredPitch;
-yaw = yawAntiDrift.process(filteredYaw); // Use yawAntiDrift filter for yaw
+yaw = filteredYaw;
 }
+
+    // Apply offsets to zero IMU at boot
+    roll -= rollOffset;
+    pitch -= pitchOffset;
+    yaw -= yawOffset;
 
     // Keep yaw within -180 to 180 degrees
     if (yaw > 180)
@@ -779,6 +792,35 @@ yaw = yawAntiDrift.process(filteredYaw); // Use yawAntiDrift filter for yaw
     else if (yaw < -180)
         yaw += 360;
 
+    // Convert raw acceleration to m/s^2 (assuming ±2g range)
+    const float ACC_SCALE = 16384.0; // LSB/g
+    float ax_ms2 = (float)ax / ACC_SCALE * 9.81f;
+    float ay_ms2 = (float)ay / ACC_SCALE * 9.81f;
+    float az_ms2 = (float)az / ACC_SCALE * 9.81f;
+
+    // Compute vertical acceleration in world frame
+    float pitchRad = pitch * DEG_TO_RAD;
+    float rollRad = roll * DEG_TO_RAD;
+    float worldZ = cos(pitchRad) * cos(rollRad) * az_ms2 +
+                   sin(pitchRad) * cos(rollRad) * ax_ms2 +
+                   cos(pitchRad) * sin(rollRad) * ay_ms2;
+    verticalAcc = worldZ - 9.81f; // remove gravity
+
+    // Integrate to get velocity and altitude
+    verticalVelocity += verticalAcc * dt;
+    altitude += verticalVelocity * dt;
+}
+
+// Zero IMU offsets assuming the drone is on a level surface
+void zeroIMU()
+{
+    updateIMU();
+    rollOffset = roll;
+    pitchOffset = pitch;
+    yawOffset = yaw;
+    altitude = 0;
+    altitudeSetpoint = 0;
+    verticalVelocity = 0;
 }
 
 void updatePIDControllers()
@@ -811,18 +853,24 @@ void updatePIDControllers()
         return;
     }
 
-    float pitchError = -pitch; // Target is 0°
-    float rollError = -roll;
+    float pitchError = pitchSetpoint - pitch;
+    float rollError = rollSetpoint - roll;
 
-    // ✅ Calculate yaw error with wrap-around handling
+    // Calculate yaw error with wrap-around handling
     float yawError = yawSetpoint - yaw;
-    // Handle wrap-around for yaw error
-     if (yawError > 180) yawError -= 360; //not for the time being. . .
-     else if (yawError < -180) yawError += 360;
+    if (yawError > 180)
+        yawError -= 360;
+    else if (yawError < -180)
+        yawError += 360;
 
-    rollCorrection =  rollPID.compute(rollError, dt);
+    rollCorrection = rollPID.compute(rollError, dt);
     pitchCorrection = pitchPID.compute(pitchError, dt);
     yawCorrection = yawPID.compute(yawError, dt);
+
+    float altitudeError = altitudeSetpoint - altitude;
+    // Include vertical acceleration to counter gravity when falling
+    float rawAltitudeCorrection = altitudePID.compute(altitudeError, dt) - verticalAcc * ALTITUDE_ACC_GAIN;
+    altitudeCorrection = constrain(rawAltitudeCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
 
 
     // NaN errors should be immediate but rate-limited
@@ -976,12 +1024,15 @@ void setup()
 
     // Configure Kalman filters
     setupKalmanFilters();
+    zeroIMU(); // Zero IMU readings on boot
 
     lastUpdate = millis();
     lastCommandTime = millis();
 
-    // ✅ Initialize yaw setpoint to current yaw
-    yawSetpoint = yaw;
+    // Initialize setpoints to current orientation/altitude
+    pitchSetpoint = 0;
+    rollSetpoint = 0;
+    yawSetpoint = 0;
 
     Serial.println("System ready for flight!");
     delay(2000);
