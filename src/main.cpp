@@ -61,6 +61,8 @@ const int MOTOR_MIN = 1000;
 const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
+const int THROTTLE_HOVER = (THROTTLE_MIN + THROTTLE_MAX) / 2;
+const int THROTTLE_DEADBAND = 20;
 const int CORRECTION_LIMIT = 150;
 const int EASING_RATE = 2000; // respond almost instantly
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
@@ -635,8 +637,12 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         pitchSetpoint = command.pitchAngle;
         rollSetpoint = command.rollAngle;
         yawSetpoint = command.yawAngle;
-        const int THROTTLE_CENTER = (THROTTLE_MIN + THROTTLE_MAX) / 2;
-        altitudeSetpoint = altitude + (command.throttle - THROTTLE_CENTER) * 0.01f;
+
+        int throttleDelta = command.throttle - THROTTLE_HOVER;
+        if (abs(throttleDelta) > THROTTLE_DEADBAND)
+        {
+            altitudeSetpoint += throttleDelta * 0.01f;
+        }
     }
 }
 
@@ -679,7 +685,7 @@ void updateMotorOutputs()
 
 void calculateMotorMix()
 {
-    int base = command.throttle + altitudeCorrection; // apply altitude hold correction
+    int base = THROTTLE_HOVER + altitudeCorrection; // apply altitude hold correction
 
     int pitchCorr = constrain(pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
     int rollCorr = constrain(rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
