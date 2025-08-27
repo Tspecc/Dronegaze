@@ -931,13 +931,6 @@ void setup()
        noTone(BUZZER_PIN);
     } //50:78:7D:45:D9:F0 new mac
 
-    if (BUZZER_PIN >= 0) {
-        pinMode(BUZZER_PIN, OUTPUT);
-        digitalWrite(BUZZER_PIN, HIGH);
-        delay(100);
-        digitalWrite(BUZZER_PIN, LOW);
-    }
-
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     loadPIDFromEEPROM();
