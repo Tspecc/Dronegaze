@@ -14,6 +14,7 @@ void ESC::arm(int pulse) {
 
 void ESC::writeMicroseconds(int pulse) {
     pulse = constrain(pulse, 1000, 2000);
-    uint32_t duty = map(pulse, 1000, 2000, 3276, 6553); // 16-bit PWM
+    uint32_t maxDuty = (1 << _resolution) - 1;
+    uint32_t duty = (uint64_t)maxDuty * pulse * _freq / 1000000; // scale to period
     ledcWrite(_channel, duty);
 }
