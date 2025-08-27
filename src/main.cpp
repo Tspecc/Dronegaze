@@ -13,6 +13,7 @@
 
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
+#define CONFIG_IDF_TARGET_ESP32C3
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // ESP32-C3 Super Mini (RISC-V single core)
 const int PIN_MFL = 20; // MTL
@@ -788,13 +789,6 @@ void updatePIDControllers()
     float dt = (now - lastPIDUpdate) / 1000.0;
     lastPIDUpdate = now;
 
-    // Rate-limited debug timing
-    // bool shouldDebug = (now - lastDebugPrint) >= DEBUG_INTERVAL;
-    // if (shouldDebug)
-    // {
-    //     Serial.println("DEBUG: PID dt = " + String(dt, 6));
-    // }
-
     // Prevent invalid dt
     if (dt <= 0 || dt > 0.1)
     {
@@ -814,31 +808,13 @@ void updatePIDControllers()
     // ✅ Calculate yaw error with wrap-around handling
     float yawError = yawSetpoint - yaw;
     // Handle wrap-around for yaw error
-    // if (yawError > 180) yawError -= 360; //not for the time being. . .
-    // else if (yawError < -180) yawError += 360;
+     if (yawError > 180) yawError -= 360; //not for the time being. . .
+     else if (yawError < -180) yawError += 360;
 
     rollCorrection =  rollPID.compute(rollError, dt);
     pitchCorrection = pitchPID.compute(pitchError, dt);
     yawCorrection = yawPID.compute(yawError, dt);
 
-
-    // Rate-limited debug output
-    // if (shouldDebug)
-    // {
-    //     Serial.println("DEBUG: pitch=" + String(pitch, 2) + " err=" + String(pitchError, 2) +
-    //                    " corr=" + String(pitchCorrection, 2));
-    //     Serial.println("DEBUG: roll=" + String(roll, 2) + " err=" + String(rollError, 2) +
-    //                    " corr=" + String(rollCorrection, 2));
-    //     Serial.println("DEBUG: yaw=" + String(yaw, 2) + " setpoint=" + String(yawSetpoint, 2) +
-    //                    " err=" + String(yawError, 2) + " corr=" + String(yawCorrection, 2)); // ✅ Debug yaw
-    //     Serial.println("DEBUG: Pitch PID - Kp:" + String(pitchPID.Kp, 2) +
-    //                    " Ki:" + String(pitchPID.Ki, 3) +
-    //                    " Kd:" + String(pitchPID.Kd, 2));
-    //     Serial.println("DEBUG: Yaw PID - Kp:" + String(yawPID.Kp, 2) +
-    //                    " Ki:" + String(yawPID.Ki, 3) +
-    //                    " Kd:" + String(yawPID.Kd, 2)); // ✅ Debug yaw PID
-    //     lastDebugPrint = now;
-    // }
 
     // NaN errors should be immediate but rate-limited
     if (isnan(pitchCorrection) || isnan(rollCorrection) || isnan(yawCorrection))
@@ -925,13 +901,13 @@ void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
-
+    delay(1000);
     if (BUZZER_PIN >= 0) {
         pinMode(BUZZER_PIN, OUTPUT);
-        digitalWrite(BUZZER_PIN, HIGH);
-        delay(100);
-        digitalWrite(BUZZER_PIN, LOW);
-    }
+       tone(BUZZER_PIN, 1000);
+        delay(200);
+       tone(BUZZER_PIN, 0);
+    } //50:78:7D:45:D9:F0 new mac
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
@@ -947,25 +923,19 @@ void setup()
     escFR.arm();
     escBL.arm();
     escBR.arm();
-    // delay(1000);
-    // escFL.writeMicroseconds(2000);
-    // escFR.writeMicroseconds(2000);
-    // escBL.writeMicroseconds(2000);
-    // escBR.writeMicroseconds(2000);
-    // delay(10);
-    // escFL.writeMicroseconds(1000);
-    // escFR.writeMicroseconds(1000);
-    // escBL.writeMicroseconds(1000);
-    // escBR.writeMicroseconds(1000);
-    // delay(2000);
 
     // Initialize WiFi
+
     WiFi.mode(WIFI_AP_STA);
     WiFi.config(ip,ip,{255,255,255,0});
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD,1,0,4);
     ArduinoOTA.begin();
     server.begin();
     Serial.println("WiFi AP and TCP server started");
+    Serial.print("AP IP address: ");
+    Serial.println(WiFi.softAPIP());
+    Serial.print("mac Address:");
+    Serial.println(WiFi.macAddress());
 
     // Initialize ESP-NOW
     if (esp_now_init() != ESP_OK)
