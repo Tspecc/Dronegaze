@@ -908,7 +908,9 @@ void OTATask(void *pvParameters) {
 
 void setupWiFi() {
     WiFi.mode(WIFI_AP);
+
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
+
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Access Point started, IP: ");
     Serial.println(WiFi.softAPIP());
@@ -928,6 +930,13 @@ void setup()
          delay(200);
        noTone(BUZZER_PIN);
     } //50:78:7D:45:D9:F0 new mac
+
+    if (BUZZER_PIN >= 0) {
+        pinMode(BUZZER_PIN, OUTPUT);
+        digitalWrite(BUZZER_PIN, HIGH);
+        delay(100);
+        digitalWrite(BUZZER_PIN, LOW);
+    }
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
