@@ -18,10 +18,10 @@
 
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // ESP32-C3 Super Mini (RISC-V single core)
-const int PIN_MFL = 20; // MTL
-const int PIN_MFR = 10; // MTR
-const int PIN_MBL = 21; // MBL
-const int PIN_MBR = 9;  // MBR
+const int PIN_MFL = 1; // MTL
+const int PIN_MFR = 2; // MTR
+const int PIN_MBL = 0; // MBL
+const int PIN_MBR = 3;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;
 
@@ -908,6 +908,7 @@ void OTATask(void *pvParameters) {
 
 void setupWiFi() {
     WiFi.mode(WIFI_AP);
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
     WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Access Point started, IP: ");
     Serial.println(WiFi.softAPIP());
@@ -921,18 +922,12 @@ void setup()
     Serial.println("Flight Controller Starting...");
     delay(1000);
     if (BUZZER_PIN >= 0) {
-        pinMode(BUZZER_PIN, OUTPUT);
        tone(BUZZER_PIN, 1000);
         delay(200);
-       tone(BUZZER_PIN, 0);
+         tone(BUZZER_PIN, 1180);
+         delay(200);
+       noTone(BUZZER_PIN);
     } //50:78:7D:45:D9:F0 new mac
-
-    if (BUZZER_PIN >= 0) {
-        pinMode(BUZZER_PIN, OUTPUT);
-        digitalWrite(BUZZER_PIN, HIGH);
-        delay(100);
-        digitalWrite(BUZZER_PIN, LOW);
-    }
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
