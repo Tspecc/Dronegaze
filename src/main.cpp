@@ -178,10 +178,12 @@ struct TelemetryPacket
 } __attribute__((packed));
 
 enum PairingType : uint8_t {
+
     IDENTITY_REQUEST = 0x01,
     IDENTITY_RESPONSE = 0x02,
     SERVER_IDENTITY = 0x03,
     CLIENT_ACK = 0x04
+
 };
 
 struct IdentityMessage {
@@ -335,6 +337,7 @@ uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
+
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -585,6 +588,7 @@ void handleCommand(const String &cmd)
     }
 }
 
+
 void updateBuzzer()
 {
     if (BUZZER_PIN >= 0 && buzzerOffTime && millis() > buzzerOffTime)
@@ -600,6 +604,7 @@ void beep(uint16_t freq, uint16_t duration)
         return;
     ledcWriteTone(BUZZER_CHANNEL, freq);
     buzzerOffTime = millis() + duration;
+
 }
 
 void streamTelemetry()
@@ -746,6 +751,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             memcpy(resp.mac, selfMac, 6);
             esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
         }
+
         else if (msg.type == SERVER_IDENTITY)
         {
             memcpy(iliteMac, mac, 6);
@@ -768,6 +774,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
                 beep(2000, 200); // short beep on pairing
             }
         }
+
         return;
     }
 
@@ -896,6 +903,9 @@ void checkFailsafe()
             if (ilitePaired)
             {
                 ilitePaired = false;
+
+                broadcastMac();
+
             }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
@@ -1127,6 +1137,11 @@ void FastTask(void *pvParameters) {
 
 void CommTask(void *pvParameters) {
     while (true) {
+        if (!ilitePaired && millis() - lastBroadcast > 1000) {
+            broadcastMac();
+            lastBroadcast = millis();
+        }
+
         handleIncomingData();
         streamTelemetry();
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
@@ -1208,6 +1223,8 @@ void setup()
     Serial.println("ESP-NOW initialized");
 
     // Register broadcast address for discovery
+
+
     Serial.println("OTA service started");
 
     // Initialize IMU
