@@ -706,6 +706,29 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
     {
         PairingMessage msg;
         memcpy(&msg, incomingData, sizeof(PairingMessage));
+        if (msg.type == PAIRING_REQUEST)
+        {
+            if (!ilitePaired)
+            {
+                memcpy(iliteMac, mac, 6);
+                ilitePaired = true;
+                esp_now_peer_info_t peerInfo = {};
+                memcpy(peerInfo.peer_addr, mac, 6);
+                peerInfo.channel = 0;
+                peerInfo.encrypt = false;
+                if (!esp_now_is_peer_exist(mac))
+                {
+                    esp_now_add_peer(&peerInfo);
+                }
+                PairingMessage resp = {PAIRING_RESPONSE};
+                esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
+                if (BUZZER_PIN >= 0)
+                {
+                    tone(BUZZER_PIN, 2000, 200); // short beep on pairing
+                }
+            }
+            return;
+        }
         if (msg.type == PAIRING_RESPONSE && !ilitePaired)
         {
             memcpy(iliteMac, mac, 6);
