@@ -49,6 +49,7 @@ const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
 
+
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
 const char *WIFI_PASSWORD = "ASCEpec@2025";
@@ -171,7 +172,8 @@ struct TelemetryPacket
 
 enum PairingType : uint8_t {
     PAIRING_REQUEST = 0x01,
-    PAIRING_RESPONSE = 0x02
+    PAIRING_RESPONSE = 0x02,
+    MAC_BROADCAST = 0x03
 };
 
 struct PairingMessage {
@@ -322,7 +324,7 @@ uint8_t iliteMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
-unsigned long lastPairingAttempt = 0;
+unsigned long lastBroadcast = 0;
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -573,9 +575,9 @@ void handleCommand(const String &cmd)
     }
 }
 
-void sendPairingRequest()
+void broadcastMac()
 {
-    PairingMessage msg = {PAIRING_REQUEST};
+    PairingMessage msg = {MAC_BROADCAST};
     esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
 }
 
@@ -729,23 +731,6 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             }
             return;
         }
-        if (msg.type == PAIRING_RESPONSE && !ilitePaired)
-        {
-            memcpy(iliteMac, mac, 6);
-            ilitePaired = true;
-            esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, mac, 6);
-            peerInfo.channel = 0;
-            peerInfo.encrypt = false;
-            if (!esp_now_is_peer_exist(mac))
-            {
-                esp_now_add_peer(&peerInfo);
-            }
-            if (BUZZER_PIN >= 0)
-            {
-                tone(BUZZER_PIN, 2000, 200); // short beep on pairing
-            }
-        }
         return;
     }
 
@@ -871,7 +856,7 @@ void checkFailsafe()
             if (ilitePaired)
             {
                 ilitePaired = false;
-                sendPairingRequest();
+                broadcastMac();
             }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
@@ -1103,9 +1088,9 @@ void FastTask(void *pvParameters) {
 
 void CommTask(void *pvParameters) {
     while (true) {
-        if (!ilitePaired && millis() - lastPairingAttempt > 1000) {
-            sendPairingRequest();
-            lastPairingAttempt = millis();
+        if (!ilitePaired && millis() - lastBroadcast > 1000) {
+            broadcastMac();
+            lastBroadcast = millis();
         }
         handleIncomingData();
         streamTelemetry();
@@ -1192,7 +1177,7 @@ void setup()
     {
         esp_now_add_peer(&broadcastPeer);
     }
-    sendPairingRequest();
+    broadcastMac();
 
     Serial.println("OTA service started");
 
