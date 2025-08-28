@@ -638,8 +638,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         rollSetpoint = command.rollAngle;
         yawSetpoint = command.yawAngle;
 
-        // ILITE reports throttle inversely; invert to match stabilized command expectations
-        int throttleDelta = THROTTLE_HOVER - command.throttle;
+        int throttleDelta = command.throttle - THROTTLE_HOVER;
         if (abs(throttleDelta) > THROTTLE_DEADBAND)
         {
             altitudeSetpoint += throttleDelta * 0.01f;
