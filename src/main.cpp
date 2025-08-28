@@ -159,6 +159,16 @@ struct MotorOutputs
     }
 };
 
+struct TelemetryPacket
+{
+    float pitch, roll, yaw;
+    float pitchCorrection, rollCorrection, yawCorrection;
+    uint16_t throttle;
+    int8_t pitchAngle, rollAngle, yawAngle;
+    float altitude, verticalAcc;
+    uint32_t commandAge;
+};
+
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
@@ -292,9 +302,16 @@ void loadPIDFromEEPROM()
 // ==================== COMMUNICATION FUNCTIONS ====================
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 1000; // 1 second
-bool telemetryEnabled = true;
+bool telemetryEnabled = false; // Serial/TCP telemetry disabled by default
 String messageBuffer = "";
 const int MAX_MESSAGE_LENGTH = 256;
+bool serialActive = false; // Tracks if a Serial session is currently open
+
+// Fixed ESP-NOW peer for ILITE ground station
+const uint8_t ILITE_MAC[6] = {0x50, 0x78, 0x7D, 0x45, 0xD9, 0xF0};
+
+uint8_t commandPeer[6];
+bool commandPeerSet = false;
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -547,25 +564,59 @@ void handleCommand(const String &cmd)
 
 void streamTelemetry()
 {
-    if (!telemetryEnabled)
+    if (millis() - lastTelemetry < TELEMETRY_INTERVAL)
         return;
 
-    if (millis() - lastTelemetry >= TELEMETRY_INTERVAL)
-    {
-        lastTelemetry = millis();
+    lastTelemetry = millis();
 
-        // Enhanced telemetry with yaw data, altitude, and vertical acceleration
-        String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
-                           String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
-                           String(command.throttle) + " " + String(command.pitchAngle) + " " +
-                           String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(altitude, 2) + " " +
-                           String(verticalAcc, 2) + " " + String(millis() - lastCommandTime);
-        sendLine(telemetry);
+    TelemetryPacket packet = {
+        pitch, roll, yaw,
+        pitchCorrection, rollCorrection, yawCorrection,
+        (uint16_t)command.throttle,
+        command.pitchAngle, command.rollAngle, command.yawAngle,
+        altitude, verticalAcc,
+        (uint32_t)(millis() - lastCommandTime)
+    };
+
+    // Send telemetry to ILITE ground station
+    esp_now_send(ILITE_MAC, (uint8_t *)&packet, sizeof(packet));
+
+    // Also send to the last command peer if different
+    if (commandPeerSet && memcmp(commandPeer, ILITE_MAC, 6) != 0)
+    {
+        esp_now_send(commandPeer, (uint8_t *)&packet, sizeof(packet));
+    }
+
+    bool tcpActive = client && client.connected();
+    if (!(telemetryEnabled && (serialActive || tcpActive)))
+        return;
+
+    String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
+                       String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
+                       String(command.throttle) + " " + String(command.pitchAngle) + " " +
+                       String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(altitude, 2) + " " +
+                       String(verticalAcc, 2) + " " + String(millis() - lastCommandTime);
+
+    if (serialActive)
+        Serial.println(telemetry);
+    if (tcpActive)
+    {
+        client.println(telemetry);
+        client.flush();
     }
 }
 
 void handleIncomingData()
 {
+    // Update serial connection status based on host presence
+#if ARDUINO_USB_CDC_ON_BOOT
+    serialActive = Serial && Serial.dtr();
+#else
+    // Without USB-CDC we can't detect port status; start once data arrives
+    if (Serial.available())
+        serialActive = true;
+#endif
+
     // Handle TCP client connection
     if (!client || !client.connected())
     {
@@ -636,6 +687,20 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         ThrustCommand prevCommand = command;
         memcpy(&command, incomingData, sizeof(ThrustCommand));
         lastCommandTime = millis();
+
+        if (!commandPeerSet || memcmp(commandPeer, mac, 6) != 0)
+        {
+            memcpy(commandPeer, mac, 6);
+            esp_now_peer_info_t peerInfo = {};
+            memcpy(peerInfo.peer_addr, mac, 6);
+            peerInfo.channel = 0;
+            peerInfo.encrypt = false;
+            if (!esp_now_is_peer_exist(mac))
+            {
+                esp_now_add_peer(&peerInfo);
+            }
+            commandPeerSet = true;
+        }
 
         // Update angle setpoints from command
         pitchSetpoint = command.pitchAngle;
@@ -1018,6 +1083,16 @@ void setup()
     }
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
+
+    // Register ILITE as a telemetry peer
+    esp_now_peer_info_t ilitePeer = {};
+    memcpy(ilitePeer.peer_addr, ILITE_MAC, 6);
+    ilitePeer.channel = 0;
+    ilitePeer.encrypt = false;
+    if (!esp_now_is_peer_exist(ILITE_MAC))
+    {
+        esp_now_add_peer(&ilitePeer);
+    }
 
     Serial.println("OTA service started");
 
