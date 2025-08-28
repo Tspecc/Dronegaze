@@ -169,6 +169,15 @@ struct TelemetryPacket
     uint32_t commandAge;
 };
 
+enum PairingType : uint8_t {
+    PAIRING_REQUEST = 0x01,
+    PAIRING_RESPONSE = 0x02
+};
+
+struct PairingMessage {
+    uint8_t type;
+};
+
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
@@ -307,11 +316,13 @@ String messageBuffer = "";
 const int MAX_MESSAGE_LENGTH = 256;
 bool serialActive = false; // Tracks if a Serial session is currently open
 
-// Fixed ESP-NOW peer for ILITE ground station
-const uint8_t ILITE_MAC[6] = {0x50, 0x78, 0x7D, 0x45, 0xD9, 0xF0};
-
+// Dynamic ESP-NOW pairing
+const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t iliteMac[6];
+bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
+unsigned long lastPairingAttempt = 0;
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -562,6 +573,12 @@ void handleCommand(const String &cmd)
     }
 }
 
+void sendPairingRequest()
+{
+    PairingMessage msg = {PAIRING_REQUEST};
+    esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
+}
+
 void streamTelemetry()
 {
     if (millis() - lastTelemetry < TELEMETRY_INTERVAL)
@@ -578,11 +595,14 @@ void streamTelemetry()
         (uint32_t)(millis() - lastCommandTime)
     };
 
-    // Send telemetry to ILITE ground station
-    esp_now_send(ILITE_MAC, (uint8_t *)&packet, sizeof(packet));
+    // Send telemetry to ILITE ground station if paired
+    if (ilitePaired)
+    {
+        esp_now_send(iliteMac, (uint8_t *)&packet, sizeof(packet));
+    }
 
     // Also send to the last command peer if different
-    if (commandPeerSet && memcmp(commandPeer, ILITE_MAC, 6) != 0)
+    if (commandPeerSet && (!ilitePaired || memcmp(commandPeer, iliteMac, 6) != 0))
     {
         esp_now_send(commandPeer, (uint8_t *)&packet, sizeof(packet));
     }
@@ -610,7 +630,7 @@ void handleIncomingData()
 {
     // Update serial connection status based on host presence
 #if ARDUINO_USB_CDC_ON_BOOT
-    serialActive = Serial && Serial.dtr();
+    serialActive = Serial; // DTR not available on some boards
 #else
     // Without USB-CDC we can't detect port status; start once data arrives
     if (Serial.available())
@@ -682,6 +702,30 @@ void handleIncomingData()
 // ==================== ESP-NOW CALLBACK ====================
 void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
+    if (len == sizeof(PairingMessage))
+    {
+        PairingMessage msg;
+        memcpy(&msg, incomingData, sizeof(PairingMessage));
+        if (msg.type == PAIRING_RESPONSE && !ilitePaired)
+        {
+            memcpy(iliteMac, mac, 6);
+            ilitePaired = true;
+            esp_now_peer_info_t peerInfo = {};
+            memcpy(peerInfo.peer_addr, mac, 6);
+            peerInfo.channel = 0;
+            peerInfo.encrypt = false;
+            if (!esp_now_is_peer_exist(mac))
+            {
+                esp_now_add_peer(&peerInfo);
+            }
+            if (BUZZER_PIN >= 0)
+            {
+                tone(BUZZER_PIN, 2000, 200); // short beep on pairing
+            }
+        }
+        return;
+    }
+
     if (len == sizeof(ThrustCommand))
     {
         ThrustCommand prevCommand = command;
@@ -776,9 +820,10 @@ void updateIMU();
 void updatePIDControllers();
 void checkFailsafe()
 {
+    static bool alarmActive = false;
     if (failsafe_enable)
     {
-         isArmed = command.arm_motors; // Use the command to arm/disarm motors
+        isArmed = command.arm_motors; // Use the command to arm/disarm motors
         if (millis() - lastCommandTime > FAILSAFE_TIMEOUT)
         {
             command.throttle = THROTTLE_MIN;
@@ -790,7 +835,20 @@ void checkFailsafe()
 
             // Emergency stop
             targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
-            isArmed=0;
+            isArmed = 0;
+            commandPeerSet = false;
+
+            if (ilitePaired)
+            {
+                ilitePaired = false;
+                sendPairingRequest();
+            }
+
+            if (BUZZER_PIN >= 0 && !alarmActive)
+            {
+                tone(BUZZER_PIN, 800); // continuous alarm
+                alarmActive = true;
+            }
 
             // Only print failsafe message once per second to avoid spam
             static unsigned long lastFailsafeMessage = 0;
@@ -799,6 +857,11 @@ void checkFailsafe()
                 sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
                 lastFailsafeMessage = millis();
             }
+        }
+        else if (alarmActive)
+        {
+            noTone(BUZZER_PIN);
+            alarmActive = false;
         }
     }
 }
@@ -1008,6 +1071,10 @@ void FastTask(void *pvParameters) {
 
 void CommTask(void *pvParameters) {
     while (true) {
+        if (!ilitePaired && millis() - lastPairingAttempt > 1000) {
+            sendPairingRequest();
+            lastPairingAttempt = millis();
+        }
         handleIncomingData();
         streamTelemetry();
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
@@ -1084,15 +1151,16 @@ void setup()
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
 
-    // Register ILITE as a telemetry peer
-    esp_now_peer_info_t ilitePeer = {};
-    memcpy(ilitePeer.peer_addr, ILITE_MAC, 6);
-    ilitePeer.channel = 0;
-    ilitePeer.encrypt = false;
-    if (!esp_now_is_peer_exist(ILITE_MAC))
+    // Register broadcast address for discovery
+    esp_now_peer_info_t broadcastPeer = {};
+    memcpy(broadcastPeer.peer_addr, BROADCAST_MAC, 6);
+    broadcastPeer.channel = 0;
+    broadcastPeer.encrypt = false;
+    if (!esp_now_is_peer_exist(BROADCAST_MAC))
     {
-        esp_now_add_peer(&ilitePeer);
+        esp_now_add_peer(&broadcastPeer);
     }
+    sendPairingRequest();
 
     Serial.println("OTA service started");
 
