@@ -177,6 +177,7 @@ BandPass rollFilter(0.1, 0.9);
 BandPass yawFilter(0.1, 0.9); // ✅ Add yaw filter
 PIDController pitchPID, rollPID, yawPID;
 PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
+PIDController verticalAccelPID(ALTITUDE_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
 ThrustCommand command = {THROTTLE_MIN, 0, 0, 0};
 MotorOutputs currentOutputs, targetOutputs;
 float pitch = 0, roll = 0, yaw = 0;
@@ -272,6 +273,7 @@ void loadPIDFromEEPROM()
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset();
+    verticalAccelPID.reset();
 
     pitchQuadFilter.setFrequency(pitchF);
     pitchQuadFilter.setQ(pitchQ);
@@ -353,6 +355,7 @@ void handleCommand(const String &cmd)
         pitchPID.reset();
         rollPID.reset();
         yawPID.reset(); // ✅ Reset yaw PID
+        verticalAccelPID.reset();
         yawQuadFilter.reset();
         rollQuadFilter.reset();
         pitchQuadFilter.reset();
@@ -443,6 +446,7 @@ void handleCommand(const String &cmd)
         pitchPID.reset();
         rollPID.reset();
         yawPID.reset(); // ✅ Reset yaw PID
+        verticalAccelPID.reset();
         sendLine("ACK: PID controllers reset");
     }
     else if (trimmed == "telemetry on")
@@ -550,12 +554,12 @@ void streamTelemetry()
     {
         lastTelemetry = millis();
 
-        // Enhanced telemetry with yaw data and altitude
+        // Enhanced telemetry with yaw data, altitude, and vertical acceleration
         String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
                            String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
                            String(command.throttle) + " " + String(command.pitchAngle) + " " +
                            String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(altitude, 2) + " " +
-                           String(millis() - lastCommandTime);
+                           String(verticalAcc, 2) + " " + String(millis() - lastCommandTime);
         sendLine(telemetry);
     }
 }
@@ -686,7 +690,11 @@ void updateMotorOutputs()
 
 void calculateMotorMix()
 {
-    int base = THROTTLE_HOVER + altitudeCorrection; // apply altitude hold correction
+    // Use commanded throttle as the base power level so stabilization reacts to pilot input
+    int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
+
+    // Apply altitude hold correction on top of the commanded throttle
+    base = constrain(base + altitudeCorrection, THROTTLE_MIN, THROTTLE_MAX);
 
     int pitchCorr = constrain(pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
     int rollCorr = constrain(rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
@@ -869,9 +877,10 @@ void updatePIDControllers()
     yawCorrection = yawPID.compute(yawError, dt);
 
     float altitudeError = altitudeSetpoint - altitude;
-    // Include vertical acceleration to counter gravity when falling
-    float rawAltitudeCorrection = altitudePID.compute(altitudeError, dt) - verticalAcc * ALTITUDE_ACC_GAIN;
-    altitudeCorrection = constrain(rawAltitudeCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+    float altitudePosCorr = altitudePID.compute(altitudeError, dt);
+    // Vertical acceleration PID drives vertical motion toward zero for steadier altitude holds
+    float accelCorr = verticalAccelPID.compute(-verticalAcc, dt);
+    altitudeCorrection = constrain(altitudePosCorr + accelCorr, -CORRECTION_LIMIT, CORRECTION_LIMIT);
 
 
     // NaN errors should be immediate but rate-limited
@@ -1040,6 +1049,7 @@ void setup()
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
+    verticalAccelPID.reset();
     updatePIDControllers();
 
     CREATE_TASK(
