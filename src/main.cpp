@@ -337,6 +337,8 @@ uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
+uint8_t broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+unsigned long lastBroadcast = 0;
 
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
@@ -361,6 +363,15 @@ void sendHeartbeat()
         lastHeartbeat = millis();
         sendLine("HEARTBEAT:" + String(millis()));
     }
+}
+
+void broadcastMac()
+{
+    IdentityMessage msg = {};
+    msg.type = IDENTITY_REQUEST;
+    strncpy(msg.identity, DRONE_ID, sizeof(msg.identity));
+    memcpy(msg.mac, selfMac, 6);
+    esp_now_send(broadcastAddress, (uint8_t *)&msg, sizeof(msg));
 }
 
 void handleCommand(const String &cmd)
@@ -1221,9 +1232,12 @@ void setup()
     }
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
-
     // Register broadcast address for discovery
-
+    esp_now_peer_info_t broadcastPeer = {};
+    memcpy(broadcastPeer.peer_addr, broadcastAddress, 6);
+    broadcastPeer.channel = 0;
+    broadcastPeer.encrypt = false;
+    esp_now_add_peer(&broadcastPeer);
 
     Serial.println("OTA service started");
 
