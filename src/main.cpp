@@ -197,7 +197,7 @@ BandPass yawFilter(0.1, 0.9); // ✅ Add yaw filter
 PIDController pitchPID, rollPID, yawPID;
 PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
 PIDController verticalAccelPID(ALTITUDE_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
-ThrustCommand command = {THROTTLE_MIN, 0, 0, 0};
+ThrustCommand command = {THROTTLE_MIN, 0, 0, 0, false};
 MotorOutputs currentOutputs, targetOutputs;
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
@@ -728,6 +728,12 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 
     if (len == sizeof(ThrustCommand))
     {
+        // Ignore commands from unknown devices
+        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0)
+        {
+            return;
+        }
+
         ThrustCommand prevCommand = command;
         memcpy(&command, incomingData, sizeof(ThrustCommand));
         lastCommandTime = millis();
@@ -820,10 +826,11 @@ void updateIMU();
 void updatePIDControllers();
 void checkFailsafe()
 {
-    static bool alarmActive = false;
+    static unsigned long lastAlarmTime = 0;
     if (failsafe_enable)
     {
-        isArmed = command.arm_motors; // Use the command to arm/disarm motors
+        // Only arm when paired controller explicitly arms
+        isArmed = ilitePaired && command.arm_motors;
         if (millis() - lastCommandTime > FAILSAFE_TIMEOUT)
         {
             command.throttle = THROTTLE_MIN;
@@ -844,10 +851,10 @@ void checkFailsafe()
                 sendPairingRequest();
             }
 
-            if (BUZZER_PIN >= 0 && !alarmActive)
+            if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
             {
-                tone(BUZZER_PIN, 800); // continuous alarm
-                alarmActive = true;
+                tone(BUZZER_PIN, 800, 200); // periodic short alarm
+                lastAlarmTime = millis();
             }
 
             // Only print failsafe message once per second to avoid spam
@@ -858,10 +865,12 @@ void checkFailsafe()
                 lastFailsafeMessage = millis();
             }
         }
-        else if (alarmActive)
+        else
         {
-            noTone(BUZZER_PIN);
-            alarmActive = false;
+            if (BUZZER_PIN >= 0)
+            {
+                noTone(BUZZER_PIN);
+            }
         }
     }
 }
