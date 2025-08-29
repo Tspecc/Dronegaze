@@ -1172,7 +1172,7 @@ void calibrateESCs() {
     escFR.writeMicroseconds(MOTOR_MAX);
     escBL.writeMicroseconds(MOTOR_MAX);
     escBR.writeMicroseconds(MOTOR_MAX);
-    delay(2000);
+    delay(200);
 
     // Send minimum throttle to finalize calibration and sync all ESCs
     escFL.writeMicroseconds(MOTOR_MIN);
@@ -1186,7 +1186,6 @@ void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
-    delay(1000);
     if (BUZZER_PIN >= 0) {
         ledcSetup(BUZZER_CHANNEL, 1000, PWM_RESOLUTION);
         ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
@@ -1245,7 +1244,7 @@ void setup()
     yawSetpoint = 0;
 
     Serial.println("System ready for flight!");
-    delay(2000);
+    delay(300);
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
