@@ -14,13 +14,14 @@ struct ThrustCommand {
 } __attribute__((packed));
 
 struct TelemetryPacket {
-    uint32_t magic;
-    float pitch, roll, yaw;
-    float pitchCorrection, rollCorrection, yawCorrection;
-    uint16_t throttle;
-    int8_t pitchAngle, rollAngle, yawAngle;
-    float altitude, verticalAcc;
-    uint32_t commandAge;
+  uint32_t magic;                // Should be PACKET_MAGIC
+  float pitch, roll, yaw;        // Orientation in degrees
+  float pitchCorrection, rollCorrection, yawCorrection; // PID outputs
+  uint16_t throttle;             // Current throttle command
+  int8_t pitchAngle, rollAngle, yawAngle; // Commanded angles
+  float altitude;                // Estimated altitude
+  float verticalAcc;             // Vertical acceleration in m/s^2
+  uint32_t commandAge;           // Age of last command in ms
 } __attribute__((packed));
 
 enum PairingType : uint8_t {

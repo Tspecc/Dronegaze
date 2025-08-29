@@ -8,7 +8,7 @@ static uint8_t controllerMac[6] = {0};
 const uint8_t BroadcastMac[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
 static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
-    if (len == sizeof(IdentityMessage)) {
+    if (len == sizeof(IdentityMessage) && !g_paired) {
         const IdentityMessage* msg = reinterpret_cast<const IdentityMessage*>(incomingData);
         if (msg->type == SCAN_REQUEST) {
             IdentityMessage resp{};
@@ -32,7 +32,8 @@ static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len)
             g_paired = true;
             return;
         }
-    } else if (len == sizeof(ThrustCommand)) {
+    } 
+    if (len == sizeof(ThrustCommand)) {
         const ThrustCommand* cmd = reinterpret_cast<const ThrustCommand*>(incomingData);
         lastCmd = *cmd;
         return;
