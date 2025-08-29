@@ -1,15 +1,14 @@
 #include <Arduino.h>
 #include <ArduinoOTA.h>
 #include <Wire.h>
-#include <MPU6050.h>
-#include "Kalman.h"
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <esp_now.h>
-#include "ESC.h"
-#include <bandpass.h>
 #include <EEPROM.h>
-#include "QuadFilter.h"
+#include "comms.h"
+#include "pid.h"
+#include "imu.h"
+#include "motor.h"
 
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
@@ -28,10 +27,10 @@ const uint32_t CPU_FREQ_MHZ = 160;
 const int PWM_RESOLUTION = 14;
 
 // Reduced stack sizes for smaller RAM
-const uint16_t FAST_TASK_STACK = 2048;
-const uint16_t COMM_TASK_STACK = 4096;
-const uint16_t FAILSAFE_TASK_STACK = 2048;
-const uint16_t OTA_TASK_STACK = 2048;
+const uint16_t FAST_TASK_STACK = 2048*2;
+const uint16_t COMM_TASK_STACK = 4096*2;
+const uint16_t FAILSAFE_TASK_STACK = 2048*2;
+const uint16_t OTA_TASK_STACK = 2048*2;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
 #else
 // Default ESP32 (e.g., NodeMCU-32S)
@@ -48,6 +47,9 @@ const uint16_t FAILSAFE_TASK_STACK = 2048;
 const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
+
+const int BUZZER_CHANNEL = 4;
+
 
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
@@ -73,142 +75,38 @@ const float ALTITUDE_ACC_GAIN = 20.0f; // throttle units per m/s^2
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
 const float rad_to_deg = 180.0 / PI;
 
+// ESC calibration is disabled by default to prevent unintended motor spin-ups.
+// Set to true when you explicitly want to calibrate ESCs on the next boot.
+const bool ENABLE_ESC_CALIBRATION = false;
+
 bool failsafe_enable = 1;
 bool isArmed = 0;
 
 bool enableFilters = false; // Enable or disable filters
 bool enableQuadFilters = false;
 
-// ==================== STRUCTURES ====================
-
-// use higher cutoff frequencies for more responsive filtering
-CascadedFilter pitchQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter rollQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
-CascadedFilter yawQuadFilter(1, 200.0, 20.0, 0.707, FilterType::LOW_PASS);
-
-struct PIDController
-{
-    float Kp, Ki, Kd;
-    float errorSum;
-    float lastError;
-    bool initialized;
-
-    PIDController(float p = 2.0, float i = 0.0, float d = 0.5)
-        : Kp(p), Ki(i), Kd(d), errorSum(0), lastError(0), initialized(false) {}
-
-    float compute(float error, float dt)
-    {
-        static unsigned long lastErrorMsg = 0;
-        unsigned long now = millis();
-        if (isnan(error) || isnan(dt) || dt <= 0)
-        {
-            if (now - lastErrorMsg > 2000)
-            {
-                Serial.println("ERROR: Invalid PID inputs - error:" + String(error) + " dt:" + String(dt));
-                lastErrorMsg = now;
-            }
-            return 0;
-        }
-        if (!initialized)
-        {
-            lastError = error;
-            initialized = true;
-        }
-        errorSum += error * dt;
-        errorSum = constrain(errorSum, -100, 100);
-        float derivative = (error - lastError) / dt;
-        if (isnan(derivative))
-            derivative = 0;
-        lastError = error;
-        float output = Kp * error + Ki * errorSum + Kd * derivative;
-        if (isnan(output))
-            return 0;
-        return output;
-    }
-
-    void reset()
-    {
-        errorSum = 0;
-        lastError = 0;
-        initialized = false;
-    }
-};
-
-// Command packet now carries absolute angle targets instead of biases
-struct ThrustCommand
-{
-    uint16_t throttle;    // Base throttle command
-    int8_t pitchAngle;    // Desired pitch angle in degrees
-    int8_t rollAngle;     // Desired roll angle in degrees
-    int8_t yawAngle;      // Desired yaw heading in degrees
-    bool arm_motors;
-};
-
-struct MotorOutputs
-{
-    int MFL, MFR, MBL, MBR;
-
-    MotorOutputs() : MFL(MOTOR_MIN), MFR(MOTOR_MIN), MBL(MOTOR_MIN), MBR(MOTOR_MIN) {}
-
-    void constrainAll()
-    {
-        MFL = constrain(MFL, MOTOR_MIN, MOTOR_MAX);
-        MFR = constrain(MFR, MOTOR_MIN, MOTOR_MAX);
-        MBL = constrain(MBL, MOTOR_MIN, MOTOR_MAX);
-        MBR = constrain(MBR, MOTOR_MIN, MOTOR_MAX);
-    }
-};
-
-struct TelemetryPacket
-{
-    float pitch, roll, yaw;
-    float pitchCorrection, rollCorrection, yawCorrection;
-    uint16_t throttle;
-    int8_t pitchAngle, rollAngle, yawAngle;
-    float altitude, verticalAcc;
-    uint32_t commandAge;
-};
-
-enum PairingType : uint8_t {
-    PAIRING_REQUEST = 0x01,
-    PAIRING_RESPONSE = 0x02
-};
-
-struct PairingMessage {
-    uint8_t type;
-};
+const char *DRONE_ID = "DrongazeA1";
+const uint32_t PACKET_MAGIC = 0xA1B2C3D4;
 
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
-MPU6050 mpu;
-
-ESC escFL(PIN_MFL, 0, 50, PWM_RESOLUTION),
-    escFR(PIN_MFR, 1, 50, PWM_RESOLUTION),
-    escBL(PIN_MBL, 2, 50, PWM_RESOLUTION),
-    escBR(PIN_MBR, 3, 50, PWM_RESOLUTION);
-
 WiFiServer server(TCP_PORT);
 WiFiClient client;
-KalmanFilter kalmanX, kalmanY, kalmanZ;
-// lighten bandpass filtering for faster response
-BandPass pitchFilter(0.1, 0.9);
-BandPass rollFilter(0.1, 0.9);
-BandPass yawFilter(0.1, 0.9); // ✅ Add yaw filter
 PIDController pitchPID, rollPID, yawPID;
 PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
 PIDController verticalAccelPID(ALTITUDE_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
-ThrustCommand command = {THROTTLE_MIN, 0, 0, 0, false};
-MotorOutputs currentOutputs, targetOutputs;
+Comms::ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
+Motor::Outputs currentOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
+Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
 float altitudeCorrection = 0;
 float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
-float altitude = 0, altitudeSetpoint = 0, verticalVelocity = 0, verticalAcc = 0;
-float pitchOffset = 0, rollOffset = 0, yawOffset = 0; // offsets for IMU zeroing
-unsigned long lastUpdate = 0;
+float altitudeSetpoint = 0;
 unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
 String incomingCommand = "";
+unsigned long buzzerOffTime = 0;
 
 // ==================== EEPROM FUNCTIONS ====================
 
@@ -230,28 +128,12 @@ uint32_t calculateChecksum(const PIDParams &params)
 }
 const uint32_t EEPROM_MAGIC = 0xABCD1234; // Signature to verify EEPROM is initialized
 const int EEPROM_MAGIC_ADDR = EEPROM_ADDR + EEPROM_SIZE - sizeof(uint32_t); // Store it at the end
-double yawQ,pitchQ,rollQ,yawF,pitchF,rollF; 
 
 void savePIDToEEPROM()
 {
-    pitchF = pitchQuadFilter.fre;
-    pitchQ = pitchQuadFilter.getQ();
-
-    rollF= rollQuadFilter.fre;
-    rollQ= rollQuadFilter.getQ();
-
-    yawF=yawQuadFilter.fre;
-    yawQ=yawQuadFilter.getQ();
-
     EEPROM.put(EEPROM_ADDR, pitchPID);
     EEPROM.put(EEPROM_ADDR + sizeof(PIDController), rollPID);
     EEPROM.put(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController), yawQ);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + sizeof(double)+1,  yawF);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController)+ 2*sizeof(double)+1, pitchQ);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + 3*sizeof(double)+1,  pitchF);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController)+ 4*sizeof(double)+1, rollQ);
-    EEPROM.put(EEPROM_ADDR + 3 * sizeof(PIDController) + 5*sizeof(double)+1,  rollF);
 
     EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);  // Write the magic number
     EEPROM.commit();
@@ -266,15 +148,6 @@ void loadPIDFromEEPROM()
 
     if (storedMagic != EEPROM_MAGIC)
     {
-    yawQ=0.707;
-    yawF=10.0;
-
-    pitchQ=0.707;
-    pitchF=10.0;
-
-    rollQ=0.707;
-    rollF=10.0;
-  
         Serial.println("EEPROM not initialized or corrupted. Using defaults.");
         return; // Don’t load anything; system will use default constructed PIDs
     }
@@ -282,28 +155,11 @@ void loadPIDFromEEPROM()
     EEPROM.get(EEPROM_ADDR, pitchPID);
     EEPROM.get(EEPROM_ADDR + sizeof(PIDController), rollPID);
     EEPROM.get(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController), yawQ);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + sizeof(double)+1,  yawF);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController)+ 2*sizeof(double)+1, pitchQ);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + 3*sizeof(double)+1,  pitchF);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController)+ 4*sizeof(double)+1, rollQ);
-    EEPROM.get(EEPROM_ADDR + 3 * sizeof(PIDController) + 5*sizeof(double)+1,  rollF);
 
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset();
     verticalAccelPID.reset();
-
-    pitchQuadFilter.setFrequency(pitchF);
-    pitchQuadFilter.setQ(pitchQ);
-
-    rollQuadFilter.setFrequency(rollF);
-    rollQuadFilter.setQ(rollQ);
-
-    yawQuadFilter.setFrequency(yawF);
-    yawQuadFilter.setQ(yawQ);
-
-
 
     Serial.println("PID values loaded from EEPROM");
 }
@@ -317,12 +173,13 @@ const int MAX_MESSAGE_LENGTH = 256;
 bool serialActive = false; // Tracks if a Serial session is currently open
 
 // Dynamic ESP-NOW pairing
-const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 uint8_t iliteMac[6];
+uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
-unsigned long lastPairingAttempt = 0;
+unsigned long lastDiscoveryTime = 0;
+
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -361,9 +218,6 @@ void handleCommand(const String &cmd)
         sendLine("Pitch PID: Kp=" + String(pitchPID.Kp, 3) + " Ki=" + String(pitchPID.Ki, 3) + " Kd=" + String(pitchPID.Kd, 3));
         sendLine("Roll  PID: Kp=" + String(rollPID.Kp, 3) + " Ki=" + String(rollPID.Ki, 3) + " Kd=" + String(rollPID.Kd, 3));
         sendLine("Yaw   PID: Kp=" + String(yawPID.Kp, 3) + " Ki=" + String(yawPID.Ki, 3) + " Kd=" + String(yawPID.Kd, 3)); // ✅ Show yaw PID
-        sendLine("PITCH_FILTER " + String(pitchQuadFilter.getQ(), 3) + " " + String(pitchQuadFilter.fre, 3));
-        sendLine("ROLL_FILTER " + String(rollQuadFilter.getQ(), 3) + " " + String(rollQuadFilter.fre, 3));
-        sendLine("YAW_FILTER " + String(yawQuadFilter.getQ(), 3) + " " + String(yawQuadFilter.fre, 3));
         sendLine("System: " + String(millis()) + "ms uptime");
         sendLine("Last Command: " + String(millis() - lastCommandTime) + "ms ago");
         sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "°"); // ✅ Show yaw setpoint
@@ -384,9 +238,6 @@ void handleCommand(const String &cmd)
         rollPID.reset();
         yawPID.reset(); // ✅ Reset yaw PID
         verticalAccelPID.reset();
-        yawQuadFilter.reset();
-        rollQuadFilter.reset();
-        pitchQuadFilter.reset();
         sendLine("ACK: PID controllers reset");
     }
     else if (trimmed == "telemetry on")
@@ -494,89 +345,40 @@ void handleCommand(const String &cmd)
     else if (trimmed == "arm")
     {
         isArmed = true;
-        escFL.arm();
-        escFR.arm();
-        escBL.arm();
-        escBR.arm();
+        Motor::update(isArmed, currentOutputs, targetOutputs);
         delay(1000);
         sendLine("ACK: Motors armed");
     }
     else if (trimmed == "disarm")
     {
         isArmed = false;
-        escFL.writeMicroseconds(1000);
-        escFR.writeMicroseconds(1000);
-        escBL.writeMicroseconds(1000);
-        escBR.writeMicroseconds(1000);
+        Motor::update(isArmed, currentOutputs, targetOutputs);
         sendLine("ACK: Motors disarmed");
     }
-    else if (trimmed.startsWith("setfilter "))
-    {
-        // Format: setfilter [pitch|roll|yaw] [freq|q] [value]
-        int firstSpace = trimmed.indexOf(' ', 10);
-        int secondSpace = trimmed.indexOf(' ', firstSpace + 1);
-
-        if (firstSpace > 0 && secondSpace > 0)
-        {
-            String axis = trimmed.substring(10, firstSpace);
-            String param = trimmed.substring(firstSpace + 1, secondSpace);
-            double value = trimmed.substring(secondSpace + 1).toDouble();
-
-            CascadedFilter *filter = nullptr;
-            if (axis == "pitch")
-                filter = &pitchQuadFilter;
-            else if (axis == "roll")
-                filter = &rollQuadFilter;
-            else if (axis == "yaw")
-                filter = &yawQuadFilter;
-
-            if (filter)
-            {
-                if (param == "freq")
-                {
-                    filter->setFrequency(value);
-                    sendLine("ACK: " + axis + " filter frequency set to " + String(value));
-                }
-                else if (param == "q")
-                {   
-                    filter->setQ(value);
-                    sendLine("ACK: " + axis + " filter Q set to " + String(value));
-                }
-                else
-                {
-                    sendLine("ERROR: Invalid filter parameter. Use freq or q");
-                }
-                pitchF=pitchQuadFilter.fre;
-                pitchQ=pitchQuadFilter.getQ();
-
-                rollF=rollQuadFilter.fre;
-                rollQ=rollQuadFilter.getQ();
-
-                yawF=yawQuadFilter.fre;
-                yawQ=yawQuadFilter.getQ();
-            }
-            else
-            {
-                sendLine("ERROR: Invalid filter axis. Use pitch, roll, or yaw");
-            }
-        }
-        else
-        {
-            sendLine("ERROR: Invalid format. Use: setfilter [pitch|roll|yaw] [freq|q] [value]");
-        }
-    }
     else
-
     {
         sendLine("ERROR: Unknown command");
         sendLine("Commands: status | set [pitch|roll|yaw] [kp|ki|kd] [value] | yaw [setpoint] | save | reset | telemetry [on|off] | ping"); // ✅ Update help
     }
 }
 
-void sendPairingRequest()
+
+void updateBuzzer()
 {
-    PairingMessage msg = {PAIRING_REQUEST};
-    esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
+    if (BUZZER_PIN >= 0 && buzzerOffTime && millis() > buzzerOffTime)
+    {
+        ledcWrite(BUZZER_CHANNEL, 0);
+        buzzerOffTime = 0;
+    }
+}
+
+void beep(uint16_t freq, uint16_t duration)
+{
+    if (BUZZER_PIN < 0)
+        return;
+    ledcWriteTone(BUZZER_CHANNEL, freq);
+    buzzerOffTime = millis() + duration;
+
 }
 
 void streamTelemetry()
@@ -586,12 +388,13 @@ void streamTelemetry()
 
     lastTelemetry = millis();
 
-    TelemetryPacket packet = {
+    Comms::TelemetryPacket packet = {
+        PACKET_MAGIC,
         pitch, roll, yaw,
         pitchCorrection, rollCorrection, yawCorrection,
         (uint16_t)command.throttle,
         command.pitchAngle, command.rollAngle, command.yawAngle,
-        altitude, verticalAcc,
+        IMU::altitude(), IMU::verticalAcc(),
         (uint32_t)(millis() - lastCommandTime)
     };
 
@@ -614,8 +417,8 @@ void streamTelemetry()
     String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
                        String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
                        String(command.throttle) + " " + String(command.pitchAngle) + " " +
-                       String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(altitude, 2) + " " +
-                       String(verticalAcc, 2) + " " + String(millis() - lastCommandTime);
+                       String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(IMU::altitude(), 2) + " " +
+                       String(IMU::verticalAcc(), 2) + " " + String(millis() - lastCommandTime);
 
     if (serialActive)
         Serial.println(telemetry);
@@ -702,63 +505,65 @@ void handleIncomingData()
 // ==================== ESP-NOW CALLBACK ====================
 void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
-    if (len == sizeof(PairingMessage))
+    if (len == sizeof(Comms::IdentityMessage))
     {
-        PairingMessage msg;
-        memcpy(&msg, incomingData, sizeof(PairingMessage));
-        if (msg.type == PAIRING_REQUEST)
+        Comms::IdentityMessage msg;
+        memcpy(&msg, incomingData, sizeof(msg));
+        if (msg.type == Comms::SCAN_REQUEST)
         {
-            if (!ilitePaired)
+            if (!esp_now_is_peer_exist(mac))
             {
-                memcpy(iliteMac, mac, 6);
-                ilitePaired = true;
                 esp_now_peer_info_t peerInfo = {};
                 memcpy(peerInfo.peer_addr, mac, 6);
                 peerInfo.channel = 0;
                 peerInfo.encrypt = false;
-                if (!esp_now_is_peer_exist(mac))
-                {
-                    esp_now_add_peer(&peerInfo);
-                }
-                PairingMessage resp = {PAIRING_RESPONSE};
-                esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
-                if (BUZZER_PIN >= 0)
-                {
-                    tone(BUZZER_PIN, 2000, 200); // short beep on pairing
-                }
+                esp_now_add_peer(&peerInfo);
             }
-            return;
+            Comms::IdentityMessage resp = {};
+            resp.type = Comms::DRONE_IDENTITY;
+            strncpy(resp.identity, DRONE_ID, sizeof(resp.identity));
+            memcpy(resp.mac, selfMac, 6);
+            esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
         }
-        if (msg.type == PAIRING_RESPONSE && !ilitePaired)
+
+        else if (msg.type == Comms::ILITE_IDENTITY)
         {
-            memcpy(iliteMac, mac, 6);
+            memcpy(iliteMac, msg.mac, 6);
             ilitePaired = true;
             esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, mac, 6);
+            memcpy(peerInfo.peer_addr, msg.mac, 6);
             peerInfo.channel = 0;
             peerInfo.encrypt = false;
-            if (!esp_now_is_peer_exist(mac))
+            if (!esp_now_is_peer_exist(msg.mac))
             {
                 esp_now_add_peer(&peerInfo);
             }
+            Comms::IdentityMessage ack = {};
+            ack.type = Comms::DRONE_ACK;
+            strncpy(ack.identity, DRONE_ID, sizeof(ack.identity));
+            memcpy(ack.mac, selfMac, 6);
+            esp_now_send(msg.mac, (uint8_t *)&ack, sizeof(ack));
             if (BUZZER_PIN >= 0)
             {
-                tone(BUZZER_PIN, 2000, 200); // short beep on pairing
+                beep(2000, 200); // short beep on pairing
             }
         }
+
         return;
     }
 
-    if (len == sizeof(ThrustCommand))
+    if (len == sizeof(Comms::ThrustCommand))
     {
-        // Ignore commands from unknown devices
-        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0)
+        Comms::ThrustCommand incoming;
+        memcpy(&incoming, incomingData, sizeof(incoming));
+
+        // Ignore commands from unknown devices or with wrong magic
+        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0 || incoming.magic != PACKET_MAGIC)
         {
             return;
         }
 
-        ThrustCommand prevCommand = command;
-        memcpy(&command, incomingData, sizeof(ThrustCommand));
+        command = incoming;
         lastCommandTime = millis();
 
         if (!commandPeerSet || memcmp(commandPeer, mac, 6) != 0)
@@ -788,68 +593,10 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
     }
 }
 
-// ==================== MOTOR CONTROL ====================
-int easeMotorOutput(int current, int target)
-{
-    if (current < target)
-    {
-        return min(current + EASING_RATE, target);
-    }
-    else
-    {
-        return max(current - EASING_RATE, target);
-    }
-}
-
-void updateMotorOutputs()
-{
-    if (isArmed)
-    {
-        currentOutputs.MFL = easeMotorOutput(currentOutputs.MFL, targetOutputs.MFL);
-        currentOutputs.MFR = easeMotorOutput(currentOutputs.MFR, targetOutputs.MFR);
-        currentOutputs.MBL = easeMotorOutput(currentOutputs.MBL, targetOutputs.MBL);
-        currentOutputs.MBR = easeMotorOutput(currentOutputs.MBR, targetOutputs.MBR);
-
-        escFL.writeMicroseconds(currentOutputs.MFL);
-        escFR.writeMicroseconds(currentOutputs.MFR);
-        escBL.writeMicroseconds(currentOutputs.MBL);
-        escBR.writeMicroseconds(currentOutputs.MBR);
-    }
-    else
-    {
-        // If not armed, set all outputs to minimum
-        escFL.writeMicroseconds(MOTOR_MIN);
-        escFR.writeMicroseconds(MOTOR_MIN);
-        escBL.writeMicroseconds(MOTOR_MIN);
-        escBR.writeMicroseconds(MOTOR_MIN);
-    }
-}
-
-void calculateMotorMix()
-{
-    // Use commanded throttle as the base power level so stabilization reacts to pilot input
-    int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
-
-    // Apply altitude hold correction on top of the commanded throttle
-    base = constrain(base + altitudeCorrection, THROTTLE_MIN, THROTTLE_MAX);
-
-    int pitchCorr = constrain(pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-    int rollCorr = constrain(rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-    int yawCorr = constrain(yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-
-    // Standard quadcopter mixing using angle corrections
-    targetOutputs.MFL = base - pitchCorr + rollCorr - yawCorr; // CCW motor
-    targetOutputs.MFR = base - pitchCorr - rollCorr + yawCorr; // CW motor
-    targetOutputs.MBL = base + pitchCorr + rollCorr - yawCorr; // CCW motor
-    targetOutputs.MBR = base + pitchCorr - rollCorr + yawCorr; // CW motor
-
-    targetOutputs.constrainAll();
-}
-void updateIMU();
-void updatePIDControllers();
 void checkFailsafe()
 {
     static unsigned long lastAlarmTime = 0;
+    updateBuzzer();
     if (failsafe_enable)
     {
         // Only arm when paired controller explicitly arms
@@ -871,12 +618,11 @@ void checkFailsafe()
             if (ilitePaired)
             {
                 ilitePaired = false;
-                sendPairingRequest();
             }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
             {
-                tone(BUZZER_PIN, 800, 200); // periodic short alarm
+                beep(800, 200); // periodic short alarm
                 lastAlarmTime = millis();
             }
 
@@ -892,223 +638,51 @@ void checkFailsafe()
         {
             if (BUZZER_PIN >= 0)
             {
-                noTone(BUZZER_PIN);
+                beep(0,1);
             }
         }
     }
-}
-
-// ==================== IMU FUNCTIONS ====================
-double filteredRoll ;
-double filteredPitch;
-double filteredYaw  ;
-
-unsigned long lastIMUVerbose;
-void updateIMU()
-{
-    int16_t ax, ay, az, gx, gy, gz;
-
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-    unsigned long now = millis();
-
-    float dt = (now - lastUpdate) / 1000.0;
-    if (dt <= 0 || dt > 0.1)
-    {
-        lastUpdate = now;
-        return;
-    }
-
-    lastUpdate = now;
-
-    float rollAcc = atan2(ay, az) * RAD_TO_DEG;
-    float pitchAcc = atan2(-ax, sqrt(ay * ay + az * az)) * RAD_TO_DEG;
-    float gyroXrate = gx / GYRO_SCALE;
-    float gyroYrate = gy / GYRO_SCALE;
-    float gyroZrate = gz / GYRO_SCALE;
-
-if(enableFilters){
- filteredRoll  = rollFilter.update(kalmanX.update(rollAcc, gyroXrate, dt));
- filteredPitch = pitchFilter.update(kalmanY.update(pitchAcc, gyroYrate, dt));
- filteredYaw   = yawFilter.update(kalmanZ.update(yaw, gyroZrate, dt));
-}else
-{
-filteredRoll = kalmanX.update(rollAcc, gyroXrate, dt);
-filteredPitch = kalmanY.update(pitchAcc, gyroYrate, dt);
-filteredYaw = kalmanZ.update(yaw, gyroZrate, dt);
-}
-
-if(enableQuadFilters){
-roll = rollQuadFilter.process(filteredRoll);
-pitch = pitchQuadFilter.process(filteredPitch);
-yaw = yawQuadFilter.process(filteredYaw);
-}else
-{
-roll = filteredRoll;
-pitch = filteredPitch;
-yaw = filteredYaw;
-}
-
-    // Apply offsets to zero IMU at boot
-    roll -= rollOffset;
-    pitch -= pitchOffset;
-    yaw -= yawOffset;
-
-    // Keep yaw within -180 to 180 degrees
-    if (yaw > 180)
-        yaw -= 360;
-    else if (yaw < -180)
-        yaw += 360;
-
-    // Convert raw acceleration to m/s^2 (assuming ±2g range)
-    const float ACC_SCALE = 16384.0; // LSB/g
-    float ax_ms2 = (float)ax / ACC_SCALE * 9.81f;
-    float ay_ms2 = (float)ay / ACC_SCALE * 9.81f;
-    float az_ms2 = (float)az / ACC_SCALE * 9.81f;
-
-    // Compute vertical acceleration in world frame
-    float pitchRad = pitch * DEG_TO_RAD;
-    float rollRad = roll * DEG_TO_RAD;
-    float worldZ = cos(pitchRad) * cos(rollRad) * az_ms2 +
-                   sin(pitchRad) * cos(rollRad) * ax_ms2 +
-                   cos(pitchRad) * sin(rollRad) * ay_ms2;
-    verticalAcc = worldZ - 9.81f; // remove gravity
-
-    // Integrate to get velocity and altitude
-    verticalVelocity += verticalAcc * dt;
-    altitude += verticalVelocity * dt;
-}
-
-// Zero IMU offsets assuming the drone is on a level surface
-void zeroIMU()
-{
-    updateIMU();
-    rollOffset = roll;
-    pitchOffset = pitch;
-    yawOffset = yaw;
-    altitude = 0;
-    altitudeSetpoint = 0;
-    verticalVelocity = 0;
-}
-
-void updatePIDControllers()
-{
-    unsigned long now = millis();
-    static unsigned long lastPIDUpdate = 0;
-    static unsigned long lastDebugPrint = 0;
-    const unsigned long DEBUG_INTERVAL = 500; // Print debug every 500ms
-
-    if (lastPIDUpdate == 0)
-    {
-        lastPIDUpdate = now;
-        Serial.println("DEBUG: PID first call - skipping");
-        return;
-    }
-
-    float dt = (now - lastPIDUpdate) / 1000.0;
-    lastPIDUpdate = now;
-
-    // Prevent invalid dt
-    if (dt <= 0 || dt > 0.1)
-    {
-        // Only print this error occasionally
-        static unsigned long lastDtError = 0;
-        if (now - lastDtError > 1000)
-        {
-            // Serial.println("DEBUG: Invalid dt detected: " + String(dt, 6));
-            lastDtError = now;
-        }
-        return;
-    }
-
-    float pitchError = pitchSetpoint - pitch;
-    float rollError = rollSetpoint - roll;
-
-    // Calculate yaw error with wrap-around handling
-    float yawError = yawSetpoint - yaw;
-    if (yawError > 180)
-        yawError -= 360;
-    else if (yawError < -180)
-        yawError += 360;
-
-    rollCorrection = rollPID.compute(rollError, dt);
-    pitchCorrection = pitchPID.compute(pitchError, dt);
-    yawCorrection = yawPID.compute(yawError, dt);
-
-    float altitudeError = altitudeSetpoint - altitude;
-    float altitudePosCorr = altitudePID.compute(altitudeError, dt);
-    // Vertical acceleration PID drives vertical motion toward zero for steadier altitude holds
-    float accelCorr = verticalAccelPID.compute(-verticalAcc, dt);
-    altitudeCorrection = constrain(altitudePosCorr + accelCorr, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-
-
-    // NaN errors should be immediate but rate-limited
-    if (isnan(pitchCorrection) || isnan(rollCorrection) || isnan(yawCorrection))
-    {
-        static unsigned long lastNaNError = 0;
-        if (now - lastNaNError > 1000)
-        {
-            Serial.println("ERROR: NaN in PID corrections");
-            lastNaNError = now;
-        }
-        pitchCorrection = 0;
-        rollCorrection = 0;
-        yawCorrection = 0; // ✅ Reset yaw correction on NaN
-    }
-}
-
-void setupKalmanFilters()
-{
-    kalmanX.Q_angle = 0.01f;
-    kalmanX.Q_bias = 0.006f;
-    kalmanX.R_measure = 0.1f;
-    kalmanY.Q_angle = 0.01f;
-    kalmanY.Q_bias = 0.006f;
-    kalmanY.R_measure = 0.05f;
-    kalmanZ.Q_angle = 0.01f; // tuned for yaw (gyro-only, no accel ref)
-    kalmanZ.Q_bias = 0.006f;
-    kalmanZ.R_measure = 0.1f;
-
-    Serial.println("Priming Kalman filters...");
-    for (int i = 0; i < 100; i++)
-    {
-        int16_t ax, ay, az, gx, gy, gz;
-        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-        float rollAcc = atan2(ay, az) * RAD_TO_DEG;
-        float pitchAcc = atan2(-ax, sqrt(ay * ay + az * az)) * RAD_TO_DEG;
-        float gyroZrate = gz / GYRO_SCALE;
-
-        if (!isnan(rollAcc) && !isnan(pitchAcc))
-        {
-            kalmanX.update(rollAcc, gx / GYRO_SCALE, 0.01);
-            kalmanY.update(pitchAcc, gy / GYRO_SCALE, 0.01);
-            yaw = kalmanZ.update(yaw, gyroZrate, 0.01); // prime yaw
-        }
-        delay(10);
-    }
-    Serial.println("Kalman filters primed");
 }
 
 // ==================== SETUP ====================
 
 void FastTask(void *pvParameters) {
     while (true) {
-        updateIMU();
-        updatePIDControllers();
-        calculateMotorMix();
-        updateMotorOutputs();
+        IMU::update();
+        pitch = IMU::pitch();
+        roll = IMU::roll();
+        yaw = IMU::yaw();
+        PIDOutputs pidOut;
+        updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint, altitudeSetpoint,
+                              pitch, roll, yaw, IMU::altitude(), IMU::verticalAcc(),
+                              pitchPID, rollPID, yawPID, altitudePID, verticalAccelPID, pidOut);
+        rollCorrection = pidOut.roll;
+        pitchCorrection = pidOut.pitch;
+        yawCorrection = pidOut.yaw;
+        altitudeCorrection = pidOut.altitude;
+        int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
+        base = constrain(base + altitudeCorrection, THROTTLE_MIN, THROTTLE_MAX);
+        int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+        int rollCorr = constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+        int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+        Motor::mix(base, pitchCorr, rollCorr, yawCorr, targetOutputs);
+        Motor::update(isArmed, currentOutputs, targetOutputs);
         vTaskDelay(pdMS_TO_TICKS(10)); // ~100 Hz (adjust to 1 kHz if needed)
     }
 }
 
 void CommTask(void *pvParameters) {
     while (true) {
-        if (!ilitePaired && millis() - lastPairingAttempt > 1000) {
-            sendPairingRequest();
-            lastPairingAttempt = millis();
-        }
         handleIncomingData();
         streamTelemetry();
+        if (!ilitePaired && millis() - lastDiscoveryTime > 1000) {
+            Comms::IdentityMessage msg = {};
+            msg.type = Comms::DRONE_IDENTITY;
+            strncpy(msg.identity, DRONE_ID, sizeof(msg.identity));
+            memcpy(msg.mac, selfMac, 6);
+            esp_now_send(Comms::BroadcastMac, (uint8_t *)&msg, sizeof(msg));
+            lastDiscoveryTime = millis();
+        }
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
     }
 }
@@ -1127,90 +701,45 @@ void OTATask(void *pvParameters) {
     }
 }
 
-void setupWiFi() {
-    WiFi.mode(WIFI_AP_STA);
-
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);
-
-    WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
-    Serial.print("Access Point started, IP: ");
-    Serial.println(WiFi.softAPIP());
-    ArduinoOTA.begin();
-    server.begin();
-}
 
 void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
-    delay(1000);
     if (BUZZER_PIN >= 0) {
-       tone(BUZZER_PIN, 1000);
+        ledcSetup(BUZZER_CHANNEL, 1000, PWM_RESOLUTION);
+        ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
+        beep(1000, 200);
         delay(200);
-         tone(BUZZER_PIN, 1180);
-         delay(200);
-       noTone(BUZZER_PIN);
+        updateBuzzer();
+        beep(1180, 200);
+        delay(200);
+        updateBuzzer();
     } //50:78:7D:45:D9:F0 new mac
 
     // Initialize EEPROM
     EEPROM.begin(EEPROM_SIZE);
     loadPIDFromEEPROM();
-    Serial.println(3 * sizeof(PIDController) + 3 * sizeof(CascadedFilter));
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
-    // Initialize ESCs
-    escFL.attach();
-    escFR.attach();
-    escBL.attach();
-    escBR.attach();
-    escFL.arm(2000);
-    escFR.arm(2000);
-    escBL.arm(2000);
-    escBR.arm(2000);
-    delay(200);
-    escFL.arm(1000);
-    escFR.arm(1000);
-    escBL.arm(1000);
-    escBR.arm(1000);
-    //to recalibrate the motors because I sort of noticed that there's some jitter in their behaviours...
-    setupWiFi();
-
-    // Initialize ESP-NOW
-    if (esp_now_init() != ESP_OK)
-    {
-        Serial.println("ESP-NOW init failed");
-        return;
+    // Initialize motor outputs
+    Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION);
+    if (ENABLE_ESC_CALIBRATION) {
+        // ESC calibration not implemented in modular version
     }
+    Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
+    ArduinoOTA.begin();
+    server.begin();
+    WiFi.macAddress(selfMac);
+
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
-
-    // Register broadcast address for discovery
-    esp_now_peer_info_t broadcastPeer = {};
-    memcpy(broadcastPeer.peer_addr, BROADCAST_MAC, 6);
-    broadcastPeer.channel = 0;
-    broadcastPeer.encrypt = false;
-    if (!esp_now_is_peer_exist(BROADCAST_MAC))
-    {
-        esp_now_add_peer(&broadcastPeer);
-    }
-    sendPairingRequest();
-
     Serial.println("OTA service started");
 
     // Initialize IMU
-    Wire.begin();
-    mpu.initialize();
-    mpu.setDLPFMode(3); // 44Hz low-pass filter
-
-    if (!mpu.testConnection())
-    {
-        Serial.println("MPU6050 connection failed");
-    }
-
-    // Configure Kalman filters
-    setupKalmanFilters();
-    zeroIMU(); // Zero IMU readings on boot
-
-    lastUpdate = millis();
+    IMU::init();
+    pitch = IMU::pitch();
+    roll = IMU::roll();
+    yaw = IMU::yaw();
     lastCommandTime = millis();
 
     // Initialize setpoints to current orientation/altitude
@@ -1219,12 +748,19 @@ void setup()
     yawSetpoint = 0;
 
     Serial.println("System ready for flight!");
-    delay(2000);
+    delay(300);
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
     verticalAccelPID.reset();
-    updatePIDControllers();
+    PIDOutputs pidOut;
+    updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint, altitudeSetpoint,
+                          pitch, roll, yaw, IMU::altitude(), IMU::verticalAcc(),
+                          pitchPID, rollPID, yawPID, altitudePID, verticalAccelPID, pidOut);
+    rollCorrection = pidOut.roll;
+    pitchCorrection = pidOut.pitch;
+    yawCorrection = pidOut.yaw;
+    altitudeCorrection = pidOut.altitude;
 
     CREATE_TASK(
         FastTask,
