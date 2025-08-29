@@ -1185,6 +1185,22 @@ void setupWiFi() {
     server.begin();
 }
 
+void calibrateESCs() {
+    // Send maximum throttle to capture ESC upper bound
+    escFL.writeMicroseconds(MOTOR_MAX);
+    escFR.writeMicroseconds(MOTOR_MAX);
+    escBL.writeMicroseconds(MOTOR_MAX);
+    escBR.writeMicroseconds(MOTOR_MAX);
+    delay(2000);
+
+    // Send minimum throttle to finalize calibration and sync all ESCs
+    escFL.writeMicroseconds(MOTOR_MIN);
+    escFR.writeMicroseconds(MOTOR_MIN);
+    escBL.writeMicroseconds(MOTOR_MIN);
+    escBR.writeMicroseconds(MOTOR_MIN);
+    delay(2000);
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -1206,21 +1222,12 @@ void setup()
     loadPIDFromEEPROM();
     Serial.println(3 * sizeof(PIDController) + 3 * sizeof(CascadedFilter));
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
-    // Initialize ESCs
+    // Initialize and calibrate ESCs
     escFL.attach();
     escFR.attach();
     escBL.attach();
     escBR.attach();
-    escFL.arm(2000);
-    escFR.arm(2000);
-    escBL.arm(2000);
-    escBR.arm(2000);
-    delay(200);
-    escFL.arm(1000);
-    escFR.arm(1000);
-    escBL.arm(1000);
-    escBR.arm(1000);
-    //to recalibrate the motors because I sort of noticed that there's some jitter in their behaviours...
+    calibrateESCs();
     setupWiFi();
     WiFi.macAddress(selfMac);
 
