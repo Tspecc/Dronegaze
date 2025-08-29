@@ -41,12 +41,13 @@ static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len)
 }
 
 void init(const char *ssid, const char *password, int tcpPort) {
+    // Run in AP+STA mode so ESP-NOW remains operational alongside SoftAP
     WiFi.mode(WIFI_AP_STA);
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    WiFi.setSleep(false);
     WiFi.softAP(ssid, password);
-    WiFi.begin(ssid, password);
+
     esp_now_init();
-    esp_now_register_recv_cb(onDataRecv);
 
     esp_now_peer_info_t peerInfo{};
     memcpy(peerInfo.peer_addr, BroadcastMac, 6);

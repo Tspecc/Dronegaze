@@ -5,6 +5,7 @@
 #include <WiFiClient.h>
 #include <esp_now.h>
 #include <EEPROM.h>
+#include <cstring>
 #include "comms.h"
 #include "pid.h"
 #include "imu.h"
@@ -167,6 +168,11 @@ void loadPIDFromEEPROM()
 // ==================== COMMUNICATION FUNCTIONS ====================
 unsigned long lastHeartbeat = 0;
 const unsigned long HEARTBEAT_INTERVAL = 1000; // 1 second
+// Time in ms before we consider the controller disconnected
+const unsigned long CONNECTION_TIMEOUT = 1000;
+// Minimum delay between handshake responses to avoid spamming
+const unsigned long HANDSHAKE_COOLDOWN = 500;
+unsigned long lastHandshakeSent = 0;
 bool telemetryEnabled = false; // Serial/TCP telemetry disabled by default
 String messageBuffer = "";
 const int MAX_MESSAGE_LENGTH = 256;
@@ -502,6 +508,16 @@ void handleIncomingData()
     }
 }
 
+// Detect dropped connections and cleanup peers
+void monitorConnection() {
+    if (ilitePaired && millis() - lastCommandTime > CONNECTION_TIMEOUT) {
+        ilitePaired = false;
+        commandPeerSet = false;
+        esp_now_del_peer(iliteMac);
+        memset(iliteMac, 0, sizeof(iliteMac));
+    }
+}
+
 // ==================== ESP-NOW CALLBACK ====================
 void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
@@ -509,24 +525,29 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
     {
         Comms::IdentityMessage msg;
         memcpy(&msg, incomingData, sizeof(msg));
+        unsigned long now = millis();
         if (msg.type == Comms::SCAN_REQUEST)
         {
-            if (!esp_now_is_peer_exist(mac))
+            if (now - lastHandshakeSent > HANDSHAKE_COOLDOWN)
             {
-                esp_now_peer_info_t peerInfo = {};
-                memcpy(peerInfo.peer_addr, mac, 6);
-                peerInfo.channel = 0;
-                peerInfo.encrypt = false;
-                esp_now_add_peer(&peerInfo);
+                if (!esp_now_is_peer_exist(mac))
+                {
+                    esp_now_peer_info_t peerInfo = {};
+                    memcpy(peerInfo.peer_addr, mac, 6);
+                    peerInfo.channel = 0;
+                    peerInfo.encrypt = false;
+                    esp_now_add_peer(&peerInfo);
+                }
+                Comms::IdentityMessage resp = {};
+                resp.type = Comms::DRONE_IDENTITY;
+                strncpy(resp.identity, DRONE_ID, sizeof(resp.identity));
+                memcpy(resp.mac, selfMac, 6);
+                esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
+                lastHandshakeSent = now;
             }
-            Comms::IdentityMessage resp = {};
-            resp.type = Comms::DRONE_IDENTITY;
-            strncpy(resp.identity, DRONE_ID, sizeof(resp.identity));
-            memcpy(resp.mac, selfMac, 6);
-            esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
         }
 
-        else if (msg.type == Comms::ILITE_IDENTITY)
+        else if (msg.type == Comms::ILITE_IDENTITY && !ilitePaired && now - lastHandshakeSent > HANDSHAKE_COOLDOWN)
         {
             memcpy(iliteMac, msg.mac, 6);
             ilitePaired = true;
@@ -543,6 +564,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             strncpy(ack.identity, DRONE_ID, sizeof(ack.identity));
             memcpy(ack.mac, selfMac, 6);
             esp_now_send(msg.mac, (uint8_t *)&ack, sizeof(ack));
+            lastHandshakeSent = now;
             if (BUZZER_PIN >= 0)
             {
                 beep(2000, 200); // short beep on pairing
@@ -669,6 +691,7 @@ void CommTask(void *pvParameters) {
     while (true) {
         handleIncomingData();
         streamTelemetry();
+        monitorConnection();
         if (!ilitePaired && millis() - lastDiscoveryTime > 1000) {
             Comms::IdentityMessage msg = {};
             msg.type = Comms::DRONE_IDENTITY;
@@ -769,7 +792,7 @@ void setup()
         CommTask,
         "CommTask",
         COMM_TASK_STACK,
-        2,
+        4,
         NULL,
         1 // Core 0 — use Core 0 for Wi-Fi tasks to avoid conflicts
     );
