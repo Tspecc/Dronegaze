@@ -179,10 +179,10 @@ struct TelemetryPacket
 
 enum PairingType : uint8_t {
 
-    IDENTITY_REQUEST = 0x01,
-    IDENTITY_RESPONSE = 0x02,
-    SERVER_IDENTITY = 0x03,
-    CLIENT_ACK = 0x04
+    SCAN_REQUEST = 0x01,
+    DRONE_IDENTITY = 0x02,
+    ILITE_IDENTITY = 0x03,
+    DRONE_ACK = 0x04
 
 };
 
@@ -337,8 +337,6 @@ uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
-uint8_t broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-unsigned long lastBroadcast = 0;
 
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
@@ -363,15 +361,6 @@ void sendHeartbeat()
         lastHeartbeat = millis();
         sendLine("HEARTBEAT:" + String(millis()));
     }
-}
-
-void broadcastMac()
-{
-    IdentityMessage msg = {};
-    msg.type = IDENTITY_REQUEST;
-    strncpy(msg.identity, DRONE_ID, sizeof(msg.identity));
-    memcpy(msg.mac, selfMac, 6);
-    esp_now_send(broadcastAddress, (uint8_t *)&msg, sizeof(msg));
 }
 
 void handleCommand(const String &cmd)
@@ -746,7 +735,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
     {
         IdentityMessage msg;
         memcpy(&msg, incomingData, sizeof(msg));
-        if (msg.type == IDENTITY_REQUEST)
+        if (msg.type == SCAN_REQUEST)
         {
             if (!esp_now_is_peer_exist(mac))
             {
@@ -757,29 +746,29 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
                 esp_now_add_peer(&peerInfo);
             }
             IdentityMessage resp = {};
-            resp.type = IDENTITY_RESPONSE;
+            resp.type = DRONE_IDENTITY;
             strncpy(resp.identity, DRONE_ID, sizeof(resp.identity));
             memcpy(resp.mac, selfMac, 6);
             esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
         }
 
-        else if (msg.type == SERVER_IDENTITY)
+        else if (msg.type == ILITE_IDENTITY)
         {
-            memcpy(iliteMac, mac, 6);
+            memcpy(iliteMac, msg.mac, 6);
             ilitePaired = true;
             esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, mac, 6);
+            memcpy(peerInfo.peer_addr, msg.mac, 6);
             peerInfo.channel = 0;
             peerInfo.encrypt = false;
-            if (!esp_now_is_peer_exist(mac))
+            if (!esp_now_is_peer_exist(msg.mac))
             {
                 esp_now_add_peer(&peerInfo);
             }
             IdentityMessage ack = {};
-            ack.type = CLIENT_ACK;
+            ack.type = DRONE_ACK;
             strncpy(ack.identity, DRONE_ID, sizeof(ack.identity));
             memcpy(ack.mac, selfMac, 6);
-            esp_now_send(mac, (uint8_t *)&ack, sizeof(ack));
+            esp_now_send(msg.mac, (uint8_t *)&ack, sizeof(ack));
             if (BUZZER_PIN >= 0)
             {
                 beep(2000, 200); // short beep on pairing
@@ -914,9 +903,6 @@ void checkFailsafe()
             if (ilitePaired)
             {
                 ilitePaired = false;
-
-                broadcastMac();
-
             }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
@@ -1148,11 +1134,6 @@ void FastTask(void *pvParameters) {
 
 void CommTask(void *pvParameters) {
     while (true) {
-        if (!ilitePaired && millis() - lastBroadcast > 1000) {
-            broadcastMac();
-            lastBroadcast = millis();
-        }
-
         handleIncomingData();
         streamTelemetry();
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
@@ -1239,13 +1220,6 @@ void setup()
     }
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
-    // Register broadcast address for discovery
-    esp_now_peer_info_t broadcastPeer = {};
-    memcpy(broadcastPeer.peer_addr, broadcastAddress, 6);
-    broadcastPeer.channel = 0;
-    broadcastPeer.encrypt = false;
-    esp_now_add_peer(&broadcastPeer);
-
     Serial.println("OTA service started");
 
     // Initialize IMU
