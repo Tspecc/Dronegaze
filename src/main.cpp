@@ -196,6 +196,8 @@ struct IdentityMessage {
     uint8_t mac[6];
 } __attribute__((packed));
 
+static const uint8_t kBroadcastMac[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
 MPU6050 mpu;
@@ -341,6 +343,7 @@ uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
+unsigned long lastDiscoveryTime = 0;
 
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
@@ -1140,6 +1143,14 @@ void CommTask(void *pvParameters) {
     while (true) {
         handleIncomingData();
         streamTelemetry();
+        if (!ilitePaired && millis() - lastDiscoveryTime > 1000) {
+            IdentityMessage msg = {};
+            msg.type = DRONE_IDENTITY;
+            strncpy(msg.identity, DRONE_ID, sizeof(msg.identity));
+            memcpy(msg.mac, selfMac, 6);
+            esp_now_send(kBroadcastMac, (uint8_t *)&msg, sizeof(msg));
+            lastDiscoveryTime = millis();
+        }
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
     }
 }
