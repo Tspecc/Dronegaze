@@ -1,9 +1,43 @@
 #include "comms.h"
+#include <cstring>
 
 namespace Comms {
 static bool g_paired = false;
 static ThrustCommand lastCmd = {0};
+static uint8_t controllerMac[6] = {0};
 const uint8_t BroadcastMac[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
+
+static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
+    if (len == sizeof(IdentityMessage)) {
+        const IdentityMessage* msg = reinterpret_cast<const IdentityMessage*>(incomingData);
+        if (msg->type == SCAN_REQUEST) {
+            IdentityMessage resp{};
+            resp.type = DRONE_IDENTITY;
+            strncpy(resp.identity, "DRONEGAZE", sizeof(resp.identity));
+            WiFi.macAddress(resp.mac);
+            esp_now_send(mac, reinterpret_cast<const uint8_t*>(&resp), sizeof(resp));
+            return;
+        } else if (msg->type == ILITE_IDENTITY) {
+            memcpy(controllerMac, mac, 6);
+            if (!esp_now_is_peer_exist(mac)) {
+                esp_now_peer_info_t peerInfo{};
+                memcpy(peerInfo.peer_addr, mac, 6);
+                peerInfo.channel = 0;
+                peerInfo.encrypt = false;
+                esp_now_add_peer(&peerInfo);
+            }
+            IdentityMessage ack{};
+            ack.type = DRONE_ACK;
+            esp_now_send(mac, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
+            g_paired = true;
+            return;
+        }
+    } else if (len == sizeof(ThrustCommand)) {
+        const ThrustCommand* cmd = reinterpret_cast<const ThrustCommand*>(incomingData);
+        lastCmd = *cmd;
+        return;
+    }
+}
 
 void init(const char *ssid, const char *password, int tcpPort) {
     WiFi.mode(WIFI_AP_STA);
@@ -11,11 +45,19 @@ void init(const char *ssid, const char *password, int tcpPort) {
     WiFi.softAP(ssid, password);
     WiFi.begin(ssid, password);
     esp_now_init();
-    g_paired = true; // placeholder for real pairing
+    esp_now_register_recv_cb(onDataRecv);
+
+    esp_now_peer_info_t peerInfo{};
+    memcpy(peerInfo.peer_addr, BroadcastMac, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    esp_now_add_peer(&peerInfo);
+
+    g_paired = false;
 }
 
 bool receiveCommand(ThrustCommand &cmd) {
-    cmd = lastCmd; // placeholder - real implementation would read from ESP-NOW
+    cmd = lastCmd;
     return g_paired;
 }
 
