@@ -28,10 +28,10 @@ const uint32_t CPU_FREQ_MHZ = 160;
 const int PWM_RESOLUTION = 14;
 
 // Reduced stack sizes for smaller RAM
-const uint16_t FAST_TASK_STACK = 2048;
-const uint16_t COMM_TASK_STACK = 4096;
-const uint16_t FAILSAFE_TASK_STACK = 2048;
-const uint16_t OTA_TASK_STACK = 2048;
+const uint16_t FAST_TASK_STACK = 2048*2;
+const uint16_t COMM_TASK_STACK = 4096*2;
+const uint16_t FAILSAFE_TASK_STACK = 2048*2;
+const uint16_t OTA_TASK_STACK = 2048*2;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
 #else
 // Default ESP32 (e.g., NodeMCU-32S)
