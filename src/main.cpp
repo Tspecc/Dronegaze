@@ -28,10 +28,10 @@ const uint32_t CPU_FREQ_MHZ = 160;
 const int PWM_RESOLUTION = 14;
 
 // Reduced stack sizes for smaller RAM
-const uint16_t FAST_TASK_STACK = 2048*2;
-const uint16_t COMM_TASK_STACK = 4096*2;
-const uint16_t FAILSAFE_TASK_STACK = 2048*2;
-const uint16_t OTA_TASK_STACK = 2048*2;
+const uint16_t FAST_TASK_STACK = 2048;
+const uint16_t COMM_TASK_STACK = 4096;
+const uint16_t FAILSAFE_TASK_STACK = 2048;
+const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
 #else
 // Default ESP32 (e.g., NodeMCU-32S)
@@ -48,9 +48,6 @@ const uint16_t FAILSAFE_TASK_STACK = 2048;
 const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
-
-const int BUZZER_CHANNEL = 4;
-
 
 /// ==================== CONSTANTS ====================
 const char *WIFI_SSID = "Dronegaze Telemetry port";
@@ -140,13 +137,12 @@ struct PIDController
 // Command packet now carries absolute angle targets instead of biases
 struct ThrustCommand
 {
-    uint32_t magic;
     uint16_t throttle;    // Base throttle command
     int8_t pitchAngle;    // Desired pitch angle in degrees
     int8_t rollAngle;     // Desired roll angle in degrees
     int8_t yawAngle;      // Desired yaw heading in degrees
     bool arm_motors;
-} __attribute__((packed));
+};
 
 struct MotorOutputs
 {
@@ -163,34 +159,24 @@ struct MotorOutputs
     }
 };
 
-const char *DRONE_ID = "DrongazeA1";
-const uint32_t PACKET_MAGIC = 0xA1B2C3D4;
-
 struct TelemetryPacket
 {
-    uint32_t magic;
     float pitch, roll, yaw;
     float pitchCorrection, rollCorrection, yawCorrection;
     uint16_t throttle;
     int8_t pitchAngle, rollAngle, yawAngle;
     float altitude, verticalAcc;
     uint32_t commandAge;
-} __attribute__((packed));
-
-enum PairingType : uint8_t {
-
-    SCAN_REQUEST = 0x01,
-    DRONE_IDENTITY = 0x02,
-    ILITE_IDENTITY = 0x03,
-    DRONE_ACK = 0x04
-
 };
 
-struct IdentityMessage {
+enum PairingType : uint8_t {
+    PAIRING_REQUEST = 0x01,
+    PAIRING_RESPONSE = 0x02
+};
+
+struct PairingMessage {
     uint8_t type;
-    char identity[16];
-    uint8_t mac[6];
-} __attribute__((packed));
+};
 
 // ==================== GLOBAL VARIABLES ====================
 // Hardware
@@ -211,7 +197,7 @@ BandPass yawFilter(0.1, 0.9); // ✅ Add yaw filter
 PIDController pitchPID, rollPID, yawPID;
 PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
 PIDController verticalAccelPID(ALTITUDE_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
-ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
+ThrustCommand command = {THROTTLE_MIN, 0, 0, 0, false};
 MotorOutputs currentOutputs, targetOutputs;
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
@@ -223,7 +209,6 @@ unsigned long lastUpdate = 0;
 unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
 String incomingCommand = "";
-unsigned long buzzerOffTime = 0;
 
 // ==================== EEPROM FUNCTIONS ====================
 
@@ -332,12 +317,12 @@ const int MAX_MESSAGE_LENGTH = 256;
 bool serialActive = false; // Tracks if a Serial session is currently open
 
 // Dynamic ESP-NOW pairing
+const uint8_t BROADCAST_MAC[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 uint8_t iliteMac[6];
-uint8_t selfMac[6];
 bool ilitePaired = false;
 uint8_t commandPeer[6];
 bool commandPeerSet = false;
-
+unsigned long lastPairingAttempt = 0;
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
 
@@ -588,23 +573,10 @@ void handleCommand(const String &cmd)
     }
 }
 
-
-void updateBuzzer()
+void sendPairingRequest()
 {
-    if (BUZZER_PIN >= 0 && buzzerOffTime && millis() > buzzerOffTime)
-    {
-        ledcWrite(BUZZER_CHANNEL, 0);
-        buzzerOffTime = 0;
-    }
-}
-
-void beep(uint16_t freq, uint16_t duration)
-{
-    if (BUZZER_PIN < 0)
-        return;
-    ledcWriteTone(BUZZER_CHANNEL, freq);
-    buzzerOffTime = millis() + duration;
-
+    PairingMessage msg = {PAIRING_REQUEST};
+    esp_now_send(BROADCAST_MAC, (uint8_t *)&msg, sizeof(msg));
 }
 
 void streamTelemetry()
@@ -615,7 +587,6 @@ void streamTelemetry()
     lastTelemetry = millis();
 
     TelemetryPacket packet = {
-        PACKET_MAGIC,
         pitch, roll, yaw,
         pitchCorrection, rollCorrection, yawCorrection,
         (uint16_t)command.throttle,
@@ -731,65 +702,63 @@ void handleIncomingData()
 // ==================== ESP-NOW CALLBACK ====================
 void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 {
-    if (len == sizeof(IdentityMessage))
+    if (len == sizeof(PairingMessage))
     {
-        IdentityMessage msg;
-        memcpy(&msg, incomingData, sizeof(msg));
-        if (msg.type == SCAN_REQUEST)
+        PairingMessage msg;
+        memcpy(&msg, incomingData, sizeof(PairingMessage));
+        if (msg.type == PAIRING_REQUEST)
         {
-            if (!esp_now_is_peer_exist(mac))
+            if (!ilitePaired)
             {
+                memcpy(iliteMac, mac, 6);
+                ilitePaired = true;
                 esp_now_peer_info_t peerInfo = {};
                 memcpy(peerInfo.peer_addr, mac, 6);
                 peerInfo.channel = 0;
                 peerInfo.encrypt = false;
-                esp_now_add_peer(&peerInfo);
+                if (!esp_now_is_peer_exist(mac))
+                {
+                    esp_now_add_peer(&peerInfo);
+                }
+                PairingMessage resp = {PAIRING_RESPONSE};
+                esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
+                if (BUZZER_PIN >= 0)
+                {
+                    tone(BUZZER_PIN, 2000, 200); // short beep on pairing
+                }
             }
-            IdentityMessage resp = {};
-            resp.type = DRONE_IDENTITY;
-            strncpy(resp.identity, DRONE_ID, sizeof(resp.identity));
-            memcpy(resp.mac, selfMac, 6);
-            esp_now_send(mac, (uint8_t *)&resp, sizeof(resp));
+            return;
         }
-
-        else if (msg.type == ILITE_IDENTITY)
+        if (msg.type == PAIRING_RESPONSE && !ilitePaired)
         {
-            memcpy(iliteMac, msg.mac, 6);
+            memcpy(iliteMac, mac, 6);
             ilitePaired = true;
             esp_now_peer_info_t peerInfo = {};
-            memcpy(peerInfo.peer_addr, msg.mac, 6);
+            memcpy(peerInfo.peer_addr, mac, 6);
             peerInfo.channel = 0;
             peerInfo.encrypt = false;
-            if (!esp_now_is_peer_exist(msg.mac))
+            if (!esp_now_is_peer_exist(mac))
             {
                 esp_now_add_peer(&peerInfo);
             }
-            IdentityMessage ack = {};
-            ack.type = DRONE_ACK;
-            strncpy(ack.identity, DRONE_ID, sizeof(ack.identity));
-            memcpy(ack.mac, selfMac, 6);
-            esp_now_send(msg.mac, (uint8_t *)&ack, sizeof(ack));
             if (BUZZER_PIN >= 0)
             {
-                beep(2000, 200); // short beep on pairing
+                tone(BUZZER_PIN, 2000, 200); // short beep on pairing
             }
         }
-
         return;
     }
 
     if (len == sizeof(ThrustCommand))
     {
-        ThrustCommand incoming;
-        memcpy(&incoming, incomingData, sizeof(incoming));
-
-        // Ignore commands from unknown devices or with wrong magic
-        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0 || incoming.magic != PACKET_MAGIC)
+        // Ignore commands from unknown devices
+        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0)
         {
             return;
         }
 
-        command = incoming;
+        ThrustCommand prevCommand = command;
+        memcpy(&command, incomingData, sizeof(ThrustCommand));
         lastCommandTime = millis();
 
         if (!commandPeerSet || memcmp(commandPeer, mac, 6) != 0)
@@ -849,10 +818,10 @@ void updateMotorOutputs()
     else
     {
         // If not armed, set all outputs to minimum
-        escFL.writeMicroseconds(1000);
-        escFR.writeMicroseconds(1000);
-        escBL.writeMicroseconds(1000);
-        escBR.writeMicroseconds(1000);
+        escFL.writeMicroseconds(MOTOR_MIN);
+        escFR.writeMicroseconds(MOTOR_MIN);
+        escBL.writeMicroseconds(MOTOR_MIN);
+        escBR.writeMicroseconds(MOTOR_MIN);
     }
 }
 
@@ -881,7 +850,6 @@ void updatePIDControllers();
 void checkFailsafe()
 {
     static unsigned long lastAlarmTime = 0;
-    updateBuzzer();
     if (failsafe_enable)
     {
         // Only arm when paired controller explicitly arms
@@ -903,11 +871,12 @@ void checkFailsafe()
             if (ilitePaired)
             {
                 ilitePaired = false;
+                sendPairingRequest();
             }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
             {
-                beep(800, 200); // periodic short alarm
+                tone(BUZZER_PIN, 800, 200); // periodic short alarm
                 lastAlarmTime = millis();
             }
 
@@ -923,7 +892,7 @@ void checkFailsafe()
         {
             if (BUZZER_PIN >= 0)
             {
-                beep(0,1);
+                noTone(BUZZER_PIN);
             }
         }
     }
@@ -1134,6 +1103,10 @@ void FastTask(void *pvParameters) {
 
 void CommTask(void *pvParameters) {
     while (true) {
+        if (!ilitePaired && millis() - lastPairingAttempt > 1000) {
+            sendPairingRequest();
+            lastPairingAttempt = millis();
+        }
         handleIncomingData();
         streamTelemetry();
         vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
@@ -1166,35 +1139,17 @@ void setupWiFi() {
     server.begin();
 }
 
-void calibrateESCs() {
-    // Send maximum throttle to capture ESC upper bound
-    escFL.writeMicroseconds(MOTOR_MAX);
-    escFR.writeMicroseconds(MOTOR_MAX);
-    escBL.writeMicroseconds(MOTOR_MAX);
-    escBR.writeMicroseconds(MOTOR_MAX);
-    delay(200);
-
-    // Send minimum throttle to finalize calibration and sync all ESCs
-    escFL.writeMicroseconds(MOTOR_MIN);
-    escFR.writeMicroseconds(MOTOR_MIN);
-    escBL.writeMicroseconds(MOTOR_MIN);
-    escBR.writeMicroseconds(MOTOR_MIN);
-    delay(2000);
-}
-
 void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
+    delay(1000);
     if (BUZZER_PIN >= 0) {
-        ledcSetup(BUZZER_CHANNEL, 1000, PWM_RESOLUTION);
-        ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
-        beep(1000, 200);
+       tone(BUZZER_PIN, 1000);
         delay(200);
-        updateBuzzer();
-        beep(1180, 200);
-        delay(200);
-        updateBuzzer();
+         tone(BUZZER_PIN, 1180);
+         delay(200);
+       noTone(BUZZER_PIN);
     } //50:78:7D:45:D9:F0 new mac
 
     // Initialize EEPROM
@@ -1202,14 +1157,22 @@ void setup()
     loadPIDFromEEPROM();
     Serial.println(3 * sizeof(PIDController) + 3 * sizeof(CascadedFilter));
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
-    // Initialize and calibrate ESCs
+    // Initialize ESCs
     escFL.attach();
     escFR.attach();
     escBL.attach();
     escBR.attach();
-    calibrateESCs();
+    escFL.arm(2000);
+    escFR.arm(2000);
+    escBL.arm(2000);
+    escBR.arm(2000);
+    delay(200);
+    escFL.arm(1000);
+    escFR.arm(1000);
+    escBL.arm(1000);
+    escBR.arm(1000);
+    //to recalibrate the motors because I sort of noticed that there's some jitter in their behaviours...
     setupWiFi();
-    WiFi.macAddress(selfMac);
 
     // Initialize ESP-NOW
     if (esp_now_init() != ESP_OK)
@@ -1219,6 +1182,18 @@ void setup()
     }
     esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
+
+    // Register broadcast address for discovery
+    esp_now_peer_info_t broadcastPeer = {};
+    memcpy(broadcastPeer.peer_addr, BROADCAST_MAC, 6);
+    broadcastPeer.channel = 0;
+    broadcastPeer.encrypt = false;
+    if (!esp_now_is_peer_exist(BROADCAST_MAC))
+    {
+        esp_now_add_peer(&broadcastPeer);
+    }
+    sendPairingRequest();
+
     Serial.println("OTA service started");
 
     // Initialize IMU
@@ -1244,7 +1219,7 @@ void setup()
     yawSetpoint = 0;
 
     Serial.println("System ready for flight!");
-    delay(300);
+    delay(2000);
     pitchPID.reset();
     rollPID.reset();
     yawPID.reset(); // ✅ Reset yaw PID
