@@ -76,6 +76,10 @@ const float ALTITUDE_ACC_GAIN = 20.0f; // throttle units per m/s^2
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
 const float rad_to_deg = 180.0 / PI;
 
+// ESC calibration is disabled by default to prevent unintended motor spin-ups.
+// Set to true when you explicitly want to calibrate ESCs on the next boot.
+const bool ENABLE_ESC_CALIBRATION = false;
+
 bool failsafe_enable = 1;
 bool isArmed = 0;
 
@@ -1208,7 +1212,9 @@ void setup()
     escFR.attach();
     escBL.attach();
     escBR.attach();
-    calibrateESCs();
+    if (ENABLE_ESC_CALIBRATION) {
+        calibrateESCs();
+    }
     setupWiFi();
     WiFi.macAddress(selfMac);
 
