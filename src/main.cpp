@@ -849,10 +849,10 @@ void updateMotorOutputs()
     else
     {
         // If not armed, set all outputs to minimum
-        escFL.writeMicroseconds(MOTOR_MIN);
-        escFR.writeMicroseconds(MOTOR_MIN);
-        escBL.writeMicroseconds(MOTOR_MIN);
-        escBR.writeMicroseconds(MOTOR_MIN);
+        escFL.writeMicroseconds(1000);
+        escFR.writeMicroseconds(1000);
+        escBL.writeMicroseconds(1000);
+        escBR.writeMicroseconds(1000);
     }
 }
 
@@ -923,7 +923,7 @@ void checkFailsafe()
         {
             if (BUZZER_PIN >= 0)
             {
-                noTone(BUZZER_PIN);
+                beep(0,1);
             }
         }
     }
