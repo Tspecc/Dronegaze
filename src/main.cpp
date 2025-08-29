@@ -547,6 +547,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             }
         }
 
+
         else if (msg.type == Comms::ILITE_IDENTITY && !ilitePaired && now - lastHandshakeSent > HANDSHAKE_COOLDOWN)
         {
             memcpy(iliteMac, msg.mac, 6);
