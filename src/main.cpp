@@ -613,12 +613,6 @@ void checkFailsafe()
             // Emergency stop
             targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
             isArmed = 0;
-            commandPeerSet = false;
-
-            if (ilitePaired)
-            {
-                ilitePaired = false;
-            }
 
             if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
             {
