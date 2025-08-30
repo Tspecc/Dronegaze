@@ -25,32 +25,29 @@ void PIDController::reset() {
 void updatePIDControllers(float pitchSetpoint,
                           float rollSetpoint,
                           float yawSetpoint,
-                          float altitudeSetpoint,
                           float pitch,
                           float roll,
                           float yaw,
-                          float altitude,
                           float verticalAcc,
+                          bool yawEnabled,
                           PIDController &pitchPID,
                           PIDController &rollPID,
                           PIDController &yawPID,
-                          PIDController &altitudePID,
                           PIDController &verticalAccelPID,
                           PIDOutputs &out) {
     float pitchError = pitchSetpoint - pitch;
     float rollError = rollSetpoint - roll;
-
-    float yawError = yawSetpoint - yaw;
-    if (yawError > 180) yawError -= 360;
-    else if (yawError < -180) yawError += 360;
-
     out.roll = rollPID.compute(rollError, 0.01f);
     out.pitch = pitchPID.compute(pitchError, 0.01f);
-    out.yaw = yawPID.compute(yawError, 0.01f);
-
-    float altitudeError = altitudeSetpoint - altitude;
-    float altitudePos = altitudePID.compute(altitudeError, 0.01f);
-    float accelCorr = verticalAccelPID.compute(-verticalAcc, 0.01f);
-    out.altitude = constrain(altitudePos + accelCorr, -150, 150);
+    if (yawEnabled) {
+        float yawError = yawSetpoint - yaw;
+        if (yawError > 180) yawError -= 360;
+        else if (yawError < -180) yawError += 360;
+        out.yaw = yawPID.compute(yawError, 0.01f);
+    } else {
+        yawPID.reset();
+        out.yaw = 0;
+    }
+    out.vertical = verticalAccelPID.compute(-verticalAcc, 0.01f);
 }
 

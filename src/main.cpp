@@ -64,13 +64,11 @@ const int MOTOR_MIN = 1000;
 const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
-const int THROTTLE_HOVER = (THROTTLE_MIN + THROTTLE_MAX) / 2;
-const int THROTTLE_DEADBAND = 20;
 const int CORRECTION_LIMIT = 150;
 const int EASING_RATE = 2000; // respond almost instantly
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
-const float ALTITUDE_ACC_GAIN = 20.0f; // throttle units per m/s^2
+const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
@@ -94,16 +92,15 @@ const uint32_t PACKET_MAGIC = 0xA1B2C3D4;
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 PIDController pitchPID, rollPID, yawPID;
-PIDController altitudePID(2.0, 0.0, 0.5); // PID for altitude hold
-PIDController verticalAccelPID(ALTITUDE_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
+PIDController verticalAccelPID(VERTICAL_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
 Comms::ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
 Motor::Outputs currentOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
-float altitudeCorrection = 0;
+float verticalCorrection = 0;
 float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
-float altitudeSetpoint = 0;
+bool yawControlEnabled = false;
 unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
 String incomingCommand = "";
@@ -244,6 +241,7 @@ void handleCommand(const String &cmd)
         rollPID.reset();
         yawPID.reset(); // ✅ Reset yaw PID
         verticalAccelPID.reset();
+        yawControlEnabled = false;
         sendLine("ACK: PID controllers reset");
     }
     else if (trimmed == "telemetry on")
@@ -262,6 +260,7 @@ void handleCommand(const String &cmd)
         sendLine("status - Show current PID values and system status");
         sendLine("set [pitch|roll|yaw] [kp|ki|kd] [value] - Set PID parameters");
         sendLine("yaw [setpoint] - Set yaw setpoint for heading hold");
+        sendLine("yawon/off - Enable or disable yaw hold");
         sendLine("save - Save PID values to EEPROM");
         sendLine("reset - Reset PID controllers");
         sendLine("telemetry on/off - Enable or disable telemetry");
@@ -315,10 +314,23 @@ void handleCommand(const String &cmd)
             sendLine("ERROR: Invalid format. Use: set [pitch|roll|yaw] [kp|ki|kd] [value]"); // ✅ Update help
         }
     }
+    else if (trimmed == "yawon")
+    {
+        yawControlEnabled = true;
+        yawSetpoint = yaw;
+        sendLine("ACK: Yaw control enabled");
+    }
+    else if (trimmed == "yawoff")
+    {
+        yawControlEnabled = false;
+        yawPID.reset();
+        sendLine("ACK: Yaw control disabled");
+    }
     else if (trimmed.startsWith("yaw ")) // ✅ Add yaw setpoint command
     {
         float newYawSetpoint = trimmed.substring(4).toFloat();
         yawSetpoint = newYawSetpoint;
+        yawControlEnabled = true;
         sendLine("ACK: Yaw setpoint set to " + String(yawSetpoint, 2) + "°");
     }
     else if (trimmed == "save")
@@ -400,7 +412,7 @@ void streamTelemetry()
         pitchCorrection, rollCorrection, yawCorrection,
         (uint16_t)command.throttle,
         command.pitchAngle, command.rollAngle, command.yawAngle,
-        IMU::altitude(), IMU::verticalAcc(),
+        IMU::verticalAcc(),
         (uint32_t)(millis() - lastCommandTime)
     };
 
@@ -423,7 +435,7 @@ void streamTelemetry()
     String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
                        String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
                        String(command.throttle) + " " + String(command.pitchAngle) + " " +
-                       String(command.rollAngle) + " " + String(command.yawAngle) + " " + String(IMU::altitude(), 2) + " " +
+                       String(command.rollAngle) + " " + String(command.yawAngle) + " " +
                        String(IMU::verticalAcc(), 2) + " " + String(millis() - lastCommandTime);
 
     if (serialActive)
@@ -607,12 +619,6 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         pitchSetpoint = command.pitchAngle;
         rollSetpoint = command.rollAngle;
         yawSetpoint = command.yawAngle;
-
-        int throttleDelta = command.throttle - THROTTLE_HOVER;
-        if (abs(throttleDelta) > THROTTLE_DEADBAND)
-        {
-            altitudeSetpoint += throttleDelta * 0.01f;
-        }
     }
 }
 
@@ -632,6 +638,7 @@ void checkFailsafe()
             command.yawAngle = yaw; // hold current yaw on failsafe
             pitchSetpoint = rollSetpoint = 0;
             yawSetpoint = yaw;
+            yawControlEnabled = false;
 
             // Emergency stop
             targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
@@ -670,15 +677,15 @@ void FastTask(void *pvParameters) {
         roll = IMU::roll();
         yaw = IMU::yaw();
         PIDOutputs pidOut;
-        updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint, altitudeSetpoint,
-                              pitch, roll, yaw, IMU::altitude(), IMU::verticalAcc(),
-                              pitchPID, rollPID, yawPID, altitudePID, verticalAccelPID, pidOut);
+        updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint,
+                             pitch, roll, yaw, IMU::verticalAcc(), yawControlEnabled,
+                             pitchPID, rollPID, yawPID, verticalAccelPID, pidOut);
         rollCorrection = pidOut.roll;
         pitchCorrection = pidOut.pitch;
         yawCorrection = pidOut.yaw;
-        altitudeCorrection = pidOut.altitude;
+        verticalCorrection = pidOut.vertical;
         int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
-        base = constrain(base + altitudeCorrection, THROTTLE_MIN, THROTTLE_MAX);
+        base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
         int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         int rollCorr = constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
@@ -760,7 +767,7 @@ void setup()
     yaw = IMU::yaw();
     lastCommandTime = millis();
 
-    // Initialize setpoints to current orientation/altitude
+    // Initialize setpoints to current orientation
     pitchSetpoint = 0;
     rollSetpoint = 0;
     yawSetpoint = 0;
@@ -772,13 +779,13 @@ void setup()
     yawPID.reset(); // ✅ Reset yaw PID
     verticalAccelPID.reset();
     PIDOutputs pidOut;
-    updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint, altitudeSetpoint,
-                          pitch, roll, yaw, IMU::altitude(), IMU::verticalAcc(),
-                          pitchPID, rollPID, yawPID, altitudePID, verticalAccelPID, pidOut);
+    updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint,
+                         pitch, roll, yaw, IMU::verticalAcc(), yawControlEnabled,
+                         pitchPID, rollPID, yawPID, verticalAccelPID, pidOut);
     rollCorrection = pidOut.roll;
     pitchCorrection = pidOut.pitch;
     yawCorrection = pidOut.yaw;
-    altitudeCorrection = pidOut.altitude;
+    verticalCorrection = pidOut.vertical;
 
     CREATE_TASK(
         FastTask,

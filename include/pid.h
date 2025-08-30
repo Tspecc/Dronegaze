@@ -18,21 +18,19 @@ struct PIDOutputs {
     float roll;
     float pitch;
     float yaw;
-    float altitude;
+    float vertical;
 };
 
 void updatePIDControllers(float pitchSetpoint,
                           float rollSetpoint,
                           float yawSetpoint,
-                          float altitudeSetpoint,
                           float pitch,
                           float roll,
                           float yaw,
-                          float altitude,
                           float verticalAcc,
+                          bool yawEnabled,
                           PIDController &pitchPID,
                           PIDController &rollPID,
                           PIDController &yawPID,
-                          PIDController &altitudePID,
                           PIDController &verticalAccelPID,
                           PIDOutputs &out);

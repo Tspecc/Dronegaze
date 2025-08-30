@@ -19,7 +19,6 @@ struct TelemetryPacket {
   float pitchCorrection, rollCorrection, yawCorrection; // PID outputs
   uint16_t throttle;             // Current throttle command
   int8_t pitchAngle, rollAngle, yawAngle; // Commanded angles
-  float altitude;                // Estimated altitude
   float verticalAcc;             // Vertical acceleration in m/s^2
   uint32_t commandAge;           // Age of last command in ms
 } __attribute__((packed));
