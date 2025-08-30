@@ -1,6 +1,10 @@
 #include "motor.h"
 
 namespace Motor {
+// On the ESP32‑C3, LEDC channels are paired by timer: channels 0/1 use timer0
+// and 2/3 use timer1. Channels 4/5 use timer2. By keeping the motors on
+// channels 0‑3 we occupy timers 0 and 1 only, leaving timer2 free for the
+// buzzer on channel 5 so their frequencies cannot conflict.
 static ESC escFL(0,0,50,16), escFR(0,1,50,16), escBL(0,2,50,16), escBR(0,3,50,16);
 static int pwmResolution = 16;
 
@@ -12,6 +16,8 @@ void Outputs::constrainAll() {
 }
 
 void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
+    // Assign channels sequentially; this maps the motors to timers 0 and 1.
+    // Timer2 remains unused and is dedicated to the buzzer (channel 5).
     escFL = ESC(pinFL,0,50,pwmRes);
     escFR = ESC(pinFR,1,50,pwmRes);
     escBL = ESC(pinBL,2,50,pwmRes);

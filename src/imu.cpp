@@ -17,6 +17,7 @@ static float pitchSlow = 0, rollSlow = 0, yawSlow = 0;
 static float g_pitch = 0, g_roll = 0, g_yaw = 0;
 static float g_verticalAcc = 0;
 static float pitchOffset = 0, rollOffset = 0, yawOffset = 0;
+static float verticalAccOffset = 0; // offset to remove initial bias
 static unsigned long lastUpdate = 0;
 
 void init() {
@@ -61,10 +62,13 @@ void update() {
     float az_ms2 = (float)az/ACC_SCALE*9.81f;
     float pitchRad = g_pitch*DEG_TO_RAD;
     float rollRad  = g_roll*DEG_TO_RAD;
-    float worldZ = cos(pitchRad)*cos(rollRad)*az_ms2 +
-                   sin(pitchRad)*cos(rollRad)*ax_ms2 +
-                   cos(pitchRad)*sin(rollRad)*ay_ms2;
-    g_verticalAcc = worldZ - 9.81f;
+    // Transform body acceleration into world-frame Z. Using the standard
+    // rotation (roll then pitch), world Z is
+    //   cos(roll)*cos(pitch)*az + sin(roll)*cos(pitch)*ay - sin(pitch)*ax
+    float worldZ = cos(rollRad)*cos(pitchRad)*az_ms2 +
+                   sin(rollRad)*cos(pitchRad)*ay_ms2 -
+                   sin(pitchRad)*ax_ms2;
+    g_verticalAcc = worldZ - 9.81f - verticalAccOffset; // remove gravity and offset
 }
 
 void zero() {
@@ -72,6 +76,7 @@ void zero() {
     rollOffset = g_roll;
     pitchOffset = g_pitch;
     yawOffset = g_yaw;
+    verticalAccOffset = g_verticalAcc;
 }
 
 float pitch() { return g_pitch; }
