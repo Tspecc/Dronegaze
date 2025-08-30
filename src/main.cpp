@@ -69,6 +69,7 @@ const int EASING_RATE = 2000; // respond almost instantly
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
 const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
+const float FLIP_ANGLE = 70.0f; // degrees; beyond this we cut motors
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
@@ -674,8 +675,15 @@ void FastTask(void *pvParameters) {
     while (true) {
         IMU::update();
         pitch = IMU::pitch();
-        roll = IMU::roll();
-        yaw = IMU::yaw();
+       roll = IMU::roll();
+       yaw = IMU::yaw();
+        // If the craft tilts beyond the safe angle, immediately disarm
+        if (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE) {
+            isArmed = false;
+            Motor::update(false, currentOutputs, targetOutputs);
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
         PIDOutputs pidOut;
         updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint,
                              pitch, roll, yaw, IMU::verticalAcc(), yawControlEnabled,

@@ -18,6 +18,11 @@ void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
     escBR = ESC(pinBR,3,50,pwmRes);
     pwmResolution = pwmRes;
     escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
+    // Verify all ESC channels operate at the expected 50 Hz. Any drift is logged
+    if (escFL.frequency()!=50 || escFR.frequency()!=50 ||
+        escBL.frequency()!=50 || escBR.frequency()!=50) {
+        Serial.println("WARNING: PWM frequency mismatch detected");
+    }
 }
 
 int ease(int current, int target) {

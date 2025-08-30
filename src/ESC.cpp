@@ -21,3 +21,5 @@ void ESC::writeMicroseconds(int pulse) {
     uint32_t duty = (uint64_t)maxDuty * pulse * _freq / 1000000; // scale to period
     ledcWrite(_channel, duty);
 }
+
+uint32_t ESC::frequency() const { return _freq; }
