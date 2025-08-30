@@ -8,7 +8,6 @@ void zero();
 float pitch();
 float roll();
 float yaw();
-float altitude();
 float verticalAcc();
 }
 

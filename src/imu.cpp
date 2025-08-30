@@ -14,7 +14,7 @@ static CascadedFilter rollQuad(1,200.0,20.0,0.707,FilterType::LOW_PASS);
 static CascadedFilter yawQuad(1,200.0,20.0,0.707,FilterType::LOW_PASS);
 
 static float g_pitch=0, g_roll=0, g_yaw=0;
-static float g_altitude=0, g_verticalAcc=0, g_verticalVel=0;
+static float g_verticalAcc=0;
 static float pitchOffset=0, rollOffset=0, yawOffset=0;
 static unsigned long lastUpdate=0;
 
@@ -60,8 +60,6 @@ void update() {
                    sin(pitchRad)*cos(rollRad)*ax_ms2+
                    cos(pitchRad)*sin(rollRad)*ay_ms2;
     g_verticalAcc = worldZ - 9.81f;
-    g_verticalVel += g_verticalAcc * dt;
-    g_altitude += g_verticalVel * dt;
 }
 
 void zero() {
@@ -69,13 +67,12 @@ void zero() {
     rollOffset = g_roll;
     pitchOffset = g_pitch;
     yawOffset = g_yaw;
-    g_altitude = 0; g_verticalVel = 0;
+
 }
 
 float pitch() { return g_pitch; }
 float roll() { return g_roll; }
 float yaw() { return g_yaw; }
-float altitude() { return g_altitude; }
 float verticalAcc() { return g_verticalAcc; }
 }
 
