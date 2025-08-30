@@ -7,6 +7,8 @@ public:
     void attach();
     void arm(int pulse = 1000);  // Default arm pulse
     void writeMicroseconds(int pulse); // 1000–2000 µs
+    // Expose the real PWM frequency so callers can verify timing
+    uint32_t frequency() const;
 private:
     int _pin;
     int _channel;
