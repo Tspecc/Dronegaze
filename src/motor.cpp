@@ -1,7 +1,10 @@
 #include "motor.h"
 
 namespace Motor {
-static ESC escFL(0,0,50,16), escFR(0,1,50,16), escBL(0,2,50,16), escBR(0,3,50,16);
+// Use LEDC channels that avoid timer conflicts with the buzzer. Channels 0 and 4
+// share timer0, channel 2 uses timer2, and channel 3 uses timer3. This leaves
+// timer1 free for the buzzer on channel 5.
+static ESC escFL(0,0,50,16), escFR(0,2,50,16), escBL(0,3,50,16), escBR(0,4,50,16);
 static int pwmResolution = 16;
 
 void Outputs::constrainAll() {
@@ -12,10 +15,13 @@ void Outputs::constrainAll() {
 }
 
 void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
+    // Assign channels to minimize shared timers with peripherals like the
+    // buzzer. Channels 0 and 4 use timer0, channel 2 uses timer2, and channel 3
+    // uses timer3. Timer1 is intentionally left unused for motor control.
     escFL = ESC(pinFL,0,50,pwmRes);
-    escFR = ESC(pinFR,1,50,pwmRes);
-    escBL = ESC(pinBL,2,50,pwmRes);
-    escBR = ESC(pinBR,3,50,pwmRes);
+    escFR = ESC(pinFR,2,50,pwmRes);
+    escBL = ESC(pinBL,3,50,pwmRes);
+    escBR = ESC(pinBR,4,50,pwmRes);
     pwmResolution = pwmRes;
     escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
     // Verify all ESC channels operate at the expected 50 Hz. Any drift is logged
