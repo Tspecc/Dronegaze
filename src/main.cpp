@@ -49,7 +49,9 @@ const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
 
-const int BUZZER_CHANNEL = 4;
+// Use LEDC channel 5 for the buzzer so it can operate on a separate timer from
+// the motors and avoid unintended interaction.
+const int BUZZER_CHANNEL = 5;
 
 
 /// ==================== CONSTANTS ====================
