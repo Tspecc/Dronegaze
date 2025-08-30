@@ -49,8 +49,11 @@ const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
 
-// Use LEDC channel 5 for the buzzer so it can operate on a separate timer from
-// the motors and avoid unintended interaction.
+
+// Use LEDC channel 5 for the buzzer. Channels are paired by timer on the
+// ESP32‑C3 (0/1, 2/3, 4/5), so channel 5 uses timer2 which none of the motors
+// occupy. This prevents the buzzer from changing the motors' 50 Hz PWM.
+
 const int BUZZER_CHANNEL = 5;
 
 
