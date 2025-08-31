@@ -22,10 +22,13 @@ void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
     // Assign channels sequentially; this maps the motors to timers 0 and 1.
     // Timer2 remains unused and is dedicated to the buzzer (channel 5).
 
+    // Keep channels sequential (0-3) so motors use only timers 0 and 1.
+    // This avoids sharing timer2 with the buzzer on channel 5 which can
+    // otherwise alter the motor PWM frequency.
     escFL = ESC(pinFL,0,50,pwmRes);
-    escFR = ESC(pinFR,2,50,pwmRes);
-    escBL = ESC(pinBL,3,50,pwmRes);
-    escBR = ESC(pinBR,4,50,pwmRes);
+    escFR = ESC(pinFR,1,50,pwmRes);
+    escBL = ESC(pinBL,2,50,pwmRes);
+    escBR = ESC(pinBR,3,50,pwmRes);
     pwmResolution = pwmRes;
     escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
     // Verify all ESC channels operate at the expected 50 Hz. Any drift is logged

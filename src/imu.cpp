@@ -1,4 +1,5 @@
 #include "imu.h"
+#include <Arduino.h>
 #include <Wire.h>
 #include <MPU6050.h>
 
@@ -73,15 +74,34 @@ void update() {
     float worldZ = cos(rollRad)*cos(pitchRad)*az_ms2 +
                    sin(rollRad)*cos(pitchRad)*ay_ms2 -
                    sin(pitchRad)*ax_ms2;
-    g_verticalAcc = worldZ - 9.81f - verticalAccOffset; // remove gravity and offset
+    // Flip sign so positive values correspond to upward acceleration.
+    g_verticalAcc = -(worldZ - 9.81f) - verticalAccOffset;
 }
 
 void zero() {
+    // Collect IMU readings for at least 3 seconds before determining
+    // offsets. This allows the sensors to settle and avoids repeated
+    // recalibration if startup readings are far from the steady state.
+    unsigned long start = millis();
+    float sumRoll = 0, sumPitch = 0, sumYaw = 0, sumVert = 0;
+    int samples = 0;
+    while (millis() - start < 3000) {
+        update();
+        sumRoll  += rollSlow;
+        sumPitch += pitchSlow;
+        sumYaw   += yawSlow;
+        sumVert  += g_verticalAcc;
+        samples++;
+        delay(5);
+    }
+
+    rollOffset = sumRoll / samples;
+    pitchOffset = sumPitch / samples;
+    yawOffset = sumYaw / samples;
+    verticalAccOffset = sumVert / samples;
+
+    // Run one more update so that g_* values reflect the new offsets.
     update();
-    rollOffset = g_roll;
-    pitchOffset = g_pitch;
-    yawOffset = g_yaw;
-    verticalAccOffset = g_verticalAcc;
 }
 
 float pitch() { return g_pitch; }
