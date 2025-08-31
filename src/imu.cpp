@@ -16,6 +16,7 @@ static float pitchFast = 0, rollFast = 0, yawFast = 0;
 static float pitchSlow = 0, rollSlow = 0, yawSlow = 0;
 static float g_pitch = 0, g_roll = 0, g_yaw = 0;
 static float g_verticalAcc = 0;
+static float g_gx = 0, g_gy = 0, g_gz = 0;
 static float pitchOffset = 0, rollOffset = 0, yawOffset = 0;
 static float verticalAccOffset = 0; // offset to remove initial bias
 static unsigned long lastUpdate = 0;
@@ -40,6 +41,10 @@ void update() {
     float gyroXrate = gx/131.0f;
     float gyroYrate = gy/131.0f;
     float gyroZrate = gz/131.0f;
+
+    g_gx = gyroXrate;
+    g_gy = gyroYrate;
+    g_gz = gyroZrate;
 
     // First stage complementary filter
     rollFast  = 0.98f*(rollFast  + gyroXrate*dt) + 0.02f*rollAcc;
@@ -83,5 +88,8 @@ float pitch() { return g_pitch; }
 float roll()  { return g_roll; }
 float yaw()   { return g_yaw; }
 float verticalAcc() { return g_verticalAcc; }
+float gyroX() { return g_gx; }
+float gyroY() { return g_gy; }
+float gyroZ() { return g_gz; }
 }
 

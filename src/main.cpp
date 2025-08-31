@@ -8,6 +8,7 @@
 #include <cstring>
 #include "comms.h"
 #include "pid.h"
+#include "control.h"
 #include "imu.h"
 #include "motor.h"
 
@@ -61,8 +62,6 @@ const int BUZZER_CHANNEL = 5;
 const char *WIFI_SSID = "Dronegaze Telemetry port";
 const char *WIFI_PASSWORD = "ASCEpec@2025";
 const int TCP_PORT = 8000;
-const int EEPROM_SIZE = 512*6;
-const int EEPROM_ADDR = 0x0;
 
 // Motor and control constants
 const int MOTOR_MIN = 1000;
@@ -70,15 +69,17 @@ const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
 const int CORRECTION_LIMIT = 150;
-const int EASING_RATE = 2000; // respond almost instantly
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
-const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
 const float FLIP_ANGLE = 70.0f; // degrees; beyond this we cut motors
+const float ARMING_ANGLE_LIMIT = 15.0f; // max tilt allowed to arm
+const int ARMING_THROTTLE = THROTTLE_MIN + 50; // throttle must stay below to arm/disarm
+const unsigned long DISARM_DELAY = 1000; // ms throttle-low before disarm
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
 const float rad_to_deg = 180.0 / PI;
+const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
 
 // ESC calibration is disabled by default to prevent unintended motor spin-ups.
 // Set to true when you explicitly want to calibrate ESCs on the next boot.
@@ -97,8 +98,6 @@ const uint32_t PACKET_MAGIC = 0xA1B2C3D4;
 // Hardware
 WiFiServer server(TCP_PORT);
 WiFiClient client;
-PIDController pitchPID, rollPID, yawPID;
-PIDController verticalAccelPID(VERTICAL_ACC_GAIN, 0.0, 5.0); // PID to damp vertical acceleration
 Comms::ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
 Motor::Outputs currentOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
@@ -112,61 +111,9 @@ unsigned long lastTelemetry = 0;
 String incomingCommand = "";
 unsigned long buzzerOffTime = 0;
 
-// ==================== EEPROM FUNCTIONS ====================
-
-// Structure to save only the PID parameters, not runtime state
-struct PIDParams
-{
-    float Kp, Ki, Kd;
-    uint32_t checksum; // Simple validation
-};
-
-// Calculate simple checksum for validation
-uint32_t calculateChecksum(const PIDParams &params)
-{
-    uint32_t sum = 0;
-    sum += (uint32_t)(params.Kp * 1000);
-    sum += (uint32_t)(params.Ki * 1000);
-    sum += (uint32_t)(params.Kd * 1000);
-    return sum;
-}
-const uint32_t EEPROM_MAGIC = 0xABCD1234; // Signature to verify EEPROM is initialized
-const int EEPROM_MAGIC_ADDR = EEPROM_ADDR + EEPROM_SIZE - sizeof(uint32_t); // Store it at the end
-
-void savePIDToEEPROM()
-{
-    EEPROM.put(EEPROM_ADDR, pitchPID);
-    EEPROM.put(EEPROM_ADDR + sizeof(PIDController), rollPID);
-    EEPROM.put(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
-
-    EEPROM.put(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);  // Write the magic number
-    EEPROM.commit();
-    Serial.println(" PID values saved to EEPROM");
-}
-
-
-void loadPIDFromEEPROM()
-{
-    uint32_t storedMagic = 0;
-    EEPROM.get(EEPROM_MAGIC_ADDR, storedMagic);
-
-    if (storedMagic != EEPROM_MAGIC)
-    {
-        Serial.println("EEPROM not initialized or corrupted. Using defaults.");
-        return; // Don’t load anything; system will use default constructed PIDs
-    }
-
-    EEPROM.get(EEPROM_ADDR, pitchPID);
-    EEPROM.get(EEPROM_ADDR + sizeof(PIDController), rollPID);
-    EEPROM.get(EEPROM_ADDR + 2 * sizeof(PIDController), yawPID);
-
-    pitchPID.reset();
-    rollPID.reset();
-    yawPID.reset();
-    verticalAccelPID.reset();
-
-    Serial.println("PID values loaded from EEPROM");
-}
+// Legacy PID controllers retained for OLED tuning interface (unused)
+PIDController pitchPID, rollPID, yawPID;
+PIDController verticalAccelPID(VERTICAL_ACC_GAIN, 0.0, 5.0);
 
 // ==================== COMMUNICATION FUNCTIONS ====================
 unsigned long lastHeartbeat = 0;
@@ -218,108 +165,21 @@ void handleCommand(const String &cmd)
 {
     String trimmed = cmd;
     trimmed.trim();
-
     if (trimmed.length() == 0)
         return;
 
     if (trimmed == "status")
     {
-        sendLine("Pitch PID: Kp=" + String(pitchPID.Kp, 3) + " Ki=" + String(pitchPID.Ki, 3) + " Kd=" + String(pitchPID.Kd, 3));
-        sendLine("Roll  PID: Kp=" + String(rollPID.Kp, 3) + " Ki=" + String(rollPID.Ki, 3) + " Kd=" + String(rollPID.Kd, 3));
-        sendLine("Yaw   PID: Kp=" + String(yawPID.Kp, 3) + " Ki=" + String(yawPID.Ki, 3) + " Kd=" + String(yawPID.Kd, 3)); // ✅ Show yaw PID
         sendLine("System: " + String(millis()) + "ms uptime");
-        sendLine("Last Command: " + String(millis() - lastCommandTime) + "ms ago");
-        sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "°"); // ✅ Show yaw setpoint
-    }else
-    if(trimmed == "failsafe on"){failsafe_enable=1; sendLine("Enabled failsafe mode");}else if (trimmed == "failsafe off"){failsafe_enable=0; sendLine("Disabled failsafe mode");}
+        sendLine("Pitch:" + String(pitch, 2) + " Roll:" + String(roll, 2) + " Yaw:" + String(yaw, 2));
+        sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "°");
+    }
+    else if(trimmed == "failsafe on"){failsafe_enable=1; sendLine("Enabled failsafe mode");}
+    else if(trimmed == "failsafe off"){failsafe_enable=0; sendLine("Disabled failsafe mode");}
     else if(trimmed == "filters on"){enableFilters = true; sendLine("Enabled filters");}
     else if(trimmed == "filters off"){enableFilters = false; sendLine("Disabled filters");}
     else if(trimmed == "quadfilters on"){enableQuadFilters = true; sendLine("Enabled quad filters");}
     else if(trimmed == "quadfilters off"){enableQuadFilters = false; sendLine("Disabled quad filters");}
-    else if (trimmed == "save")
-    {
-        savePIDToEEPROM();
-        sendLine("ACK: PID values saved to EEPROM");
-    }
-    else if (trimmed == "reset")
-    {
-        pitchPID.reset();
-        rollPID.reset();
-        yawPID.reset(); // ✅ Reset yaw PID
-        verticalAccelPID.reset();
-        yawControlEnabled = false;
-        sendLine("ACK: PID controllers reset");
-    }
-    else if (trimmed == "telemetry on")
-    {
-        telemetryEnabled = true;
-        sendLine("ACK: Telemetry enabled");
-    }
-    else if (trimmed == "telemetry off")
-    {
-        telemetryEnabled = false;
-        sendLine("ACK: Telemetry disabled");
-    }
-    else if (trimmed == "help")
-    {
-        sendLine("Available commands:");
-        sendLine("status - Show current PID values and system status");
-        sendLine("set [pitch|roll|yaw] [kp|ki|kd] [value] - Set PID parameters");
-        sendLine("yaw [setpoint] - Set yaw setpoint for heading hold");
-        sendLine("yawon/off - Enable or disable yaw hold");
-        sendLine("save - Save PID values to EEPROM");
-        sendLine("reset - Reset PID controllers");
-        sendLine("telemetry on/off - Enable or disable telemetry");
-        sendLine("ping - Check connection");
-        sendLine("arm - Arm motors");
-        sendLine("disarm - Disarm motors");
-        sendLine("setfilter [pitch|roll|yaw] [freq|q] [value] - Set filter parameters");
-    }
-    else if (trimmed.startsWith("set "))
-    {
-        // Parse: set [pitch|roll|yaw] [kp|ki|kd] [value]
-        int firstSpace = trimmed.indexOf(' ', 4);
-        int secondSpace = trimmed.indexOf(' ', firstSpace + 1);
-
-        if (firstSpace > 0 && secondSpace > 0)
-        {
-            String axis = trimmed.substring(4, firstSpace);
-            String param = trimmed.substring(firstSpace + 1, secondSpace);
-            float value = trimmed.substring(secondSpace + 1).toFloat();
-
-            PIDController *pid = nullptr;
-            if (axis == "pitch")
-                pid = &pitchPID;
-            else if (axis == "roll")
-                pid = &rollPID;
-            else if (axis == "yaw") // ✅ Add yaw PID tuning
-                pid = &yawPID;
-
-            if (pid != nullptr)
-            {
-                if (param == "kp")
-                    pid->Kp = value;
-                else if (param == "ki")
-                    pid->Ki = value;
-                else if (param == "kd")
-                    pid->Kd = value;
-                else
-                {
-                    sendLine("ERROR: Invalid parameter. Use kp, ki, or kd");
-                    return;
-                }
-                sendLine("ACK: Updated " + axis + " " + param + " to " + String(value, 3));
-            }
-            else
-            {
-                sendLine("ERROR: Invalid axis. Use pitch, roll, or yaw"); // ✅ Update error message
-            }
-        }
-        else
-        {
-            sendLine("ERROR: Invalid format. Use: set [pitch|roll|yaw] [kp|ki|kd] [value]"); // ✅ Update help
-        }
-    }
     else if (trimmed == "yawon")
     {
         yawControlEnabled = true;
@@ -329,28 +189,14 @@ void handleCommand(const String &cmd)
     else if (trimmed == "yawoff")
     {
         yawControlEnabled = false;
-        yawPID.reset();
         sendLine("ACK: Yaw control disabled");
     }
-    else if (trimmed.startsWith("yaw ")) // ✅ Add yaw setpoint command
+    else if (trimmed.startsWith("yaw "))
     {
         float newYawSetpoint = trimmed.substring(4).toFloat();
         yawSetpoint = newYawSetpoint;
         yawControlEnabled = true;
         sendLine("ACK: Yaw setpoint set to " + String(yawSetpoint, 2) + "°");
-    }
-    else if (trimmed == "save")
-    {
-        savePIDToEEPROM();
-        sendLine("ACK: PID values saved to EEPROM");
-    }
-    else if (trimmed == "reset")
-    {
-        pitchPID.reset();
-        rollPID.reset();
-        yawPID.reset(); // ✅ Reset yaw PID
-        verticalAccelPID.reset();
-        sendLine("ACK: PID controllers reset");
     }
     else if (trimmed == "telemetry on")
     {
@@ -382,7 +228,6 @@ void handleCommand(const String &cmd)
     else
     {
         sendLine("ERROR: Unknown command");
-        sendLine("Commands: status | set [pitch|roll|yaw] [kp|ki|kd] [value] | yaw [setpoint] | save | reset | telemetry [on|off] | ping"); // ✅ Update help
     }
 }
 
@@ -628,48 +473,58 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
     }
 }
 
-void checkFailsafe()
-{
+void checkFailsafe() {
     static unsigned long lastAlarmTime = 0;
+    static unsigned long disarmStart = 0;
     updateBuzzer();
-    if (failsafe_enable)
-    {
-        // Only arm when paired controller explicitly arms
-        isArmed = ilitePaired && command.arm_motors;
-        if (millis() - lastCommandTime > FAILSAFE_TIMEOUT)
-        {
-            command.throttle = THROTTLE_MIN;
-            command.pitchAngle = 0;
-            command.rollAngle = 0;
-            command.yawAngle = yaw; // hold current yaw on failsafe
-            pitchSetpoint = rollSetpoint = 0;
-            yawSetpoint = yaw;
-            yawControlEnabled = false;
+    if (!failsafe_enable) return;
 
-            // Emergency stop
-            targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
-            isArmed = 0;
+    // Connection-loss failsafe
+    if (millis() - lastCommandTime > FAILSAFE_TIMEOUT) {
+        command.throttle = THROTTLE_MIN;
+        command.pitchAngle = 0;
+        command.rollAngle = 0;
+        command.yawAngle = yaw; // hold current yaw on failsafe
+        pitchSetpoint = rollSetpoint = 0;
+        yawSetpoint = yaw;
+        yawControlEnabled = false;
 
-            if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000)
-            {
-                beep(800, 200); // periodic short alarm
-                lastAlarmTime = millis();
-            }
+        targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
+        isArmed = false;
 
-            // Only print failsafe message once per second to avoid spam
-            static unsigned long lastFailsafeMessage = 0;
-            if (millis() - lastFailsafeMessage > 5000)
-            {
-                sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
-                lastFailsafeMessage = millis();
-            }
+        if (BUZZER_PIN >= 0 && millis() - lastAlarmTime > 5000) {
+            beep(800, 200); // periodic short alarm
+            lastAlarmTime = millis();
         }
-        else
-        {
-            if (BUZZER_PIN >= 0)
-            {
-                beep(0,1);
+
+        static unsigned long lastFailsafeMessage = 0;
+        if (millis() - lastFailsafeMessage > 5000) {
+            sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
+            lastFailsafeMessage = millis();
+        }
+        return;
+    }
+
+    // Arming / disarming logic
+    if (!isArmed) {
+        if (ilitePaired && command.arm_motors &&
+            command.throttle <= ARMING_THROTTLE &&
+            fabs(pitch) < ARMING_ANGLE_LIMIT &&
+            fabs(roll) < ARMING_ANGLE_LIMIT) {
+            isArmed = true;
+            beep(1200, 100);
+        }
+    } else {
+        bool keepArmed = command.arm_motors && command.throttle > ARMING_THROTTLE;
+        if (!keepArmed) {
+            if (disarmStart == 0) disarmStart = millis();
+            if (millis() - disarmStart > DISARM_DELAY) {
+                isArmed = false;
+                targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
+                beep(400, 200);
             }
+        } else {
+            disarmStart = 0;
         }
     }
 }
@@ -685,18 +540,20 @@ void FastTask(void *pvParameters) {
         // If the craft tilts beyond the safe angle, immediately disarm
         if (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE) {
             isArmed = false;
+            beep(1000, 200);
             Motor::update(false, currentOutputs, targetOutputs);
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        PIDOutputs pidOut;
-        updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint,
-                             pitch, roll, yaw, IMU::verticalAcc(), yawControlEnabled,
-                             pitchPID, rollPID, yawPID, verticalAccelPID, pidOut);
-        rollCorrection = pidOut.roll;
-        pitchCorrection = pidOut.pitch;
-        yawCorrection = pidOut.yaw;
-        verticalCorrection = pidOut.vertical;
+        ControlOutputs ctrlOut;
+        computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                           pitch, roll, yaw,
+                           IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                           IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+        rollCorrection = ctrlOut.roll;
+        pitchCorrection = ctrlOut.pitch;
+        yawCorrection = ctrlOut.yaw;
+        verticalCorrection = ctrlOut.vertical;
         int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
         base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
         int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
@@ -755,9 +612,6 @@ void setup()
         updateBuzzer();
     } //50:78:7D:45:D9:F0 new mac
 
-    // Initialize EEPROM
-    EEPROM.begin(EEPROM_SIZE);
-    loadPIDFromEEPROM();
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
     // Initialize motor outputs
     Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION);
@@ -787,18 +641,15 @@ void setup()
 
     Serial.println("System ready for flight!");
     delay(300);
-    pitchPID.reset();
-    rollPID.reset();
-    yawPID.reset(); // ✅ Reset yaw PID
-    verticalAccelPID.reset();
-    PIDOutputs pidOut;
-    updatePIDControllers(pitchSetpoint, rollSetpoint, yawSetpoint,
-                         pitch, roll, yaw, IMU::verticalAcc(), yawControlEnabled,
-                         pitchPID, rollPID, yawPID, verticalAccelPID, pidOut);
-    rollCorrection = pidOut.roll;
-    pitchCorrection = pidOut.pitch;
-    yawCorrection = pidOut.yaw;
-    verticalCorrection = pidOut.vertical;
+    ControlOutputs ctrlOut;
+    computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                       pitch, roll, yaw,
+                       IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                       IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+    rollCorrection = ctrlOut.roll;
+    pitchCorrection = ctrlOut.pitch;
+    yawCorrection = ctrlOut.yaw;
+    verticalCorrection = ctrlOut.vertical;
 
     CREATE_TASK(
         FastTask,
