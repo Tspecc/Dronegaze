@@ -26,7 +26,7 @@ const int PIN_MBR = 3;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;
 
-const int PWM_RESOLUTION = 14;
+const int PWM_RESOLUTION = 16;
 
 // Reduced stack sizes for smaller RAM
 const uint16_t FAST_TASK_STACK = 2048*2;
@@ -537,8 +537,8 @@ void FastTask(void *pvParameters) {
         pitch = IMU::pitch();
        roll = IMU::roll();
        yaw = IMU::yaw();
-        // If the craft tilts beyond the safe angle, immediately disarm
-        if (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE) {
+        // If the craft tilts beyond the safe angle while armed, immediately disarm
+        if (isArmed && (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE)) {
             isArmed = false;
             beep(1000, 200);
             Motor::update(false, currentOutputs, targetOutputs);
@@ -602,7 +602,9 @@ void setup()
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
     if (BUZZER_PIN >= 0) {
-        ledcSetup(BUZZER_CHANNEL, 1000, PWM_RESOLUTION);
+        // Use a standard 2 kHz buzzer tone with 8-bit resolution to avoid
+        // disturbing the motor PWM timers.
+        ledcSetup(BUZZER_CHANNEL, 2000, 8);
         ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
         beep(1000, 200);
         delay(200);
