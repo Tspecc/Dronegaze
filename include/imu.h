@@ -9,5 +9,8 @@ float pitch();
 float roll();
 float yaw();
 float verticalAcc();
+float gyroX();
+float gyroY();
+float gyroZ();
 }
 
