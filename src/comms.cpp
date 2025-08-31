@@ -7,6 +7,7 @@ static ThrustCommand lastCmd = {0};
 static uint8_t controllerMac[6] = {0};
 const uint8_t BroadcastMac[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
+
 static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     if (len == sizeof(IdentityMessage) && !g_paired) {
         const IdentityMessage* msg = reinterpret_cast<const IdentityMessage*>(incomingData);

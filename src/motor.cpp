@@ -36,7 +36,7 @@ void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
 }
 
 int ease(int current, int target) {
-    const int EASING_RATE = 2000;
+    const int EASING_RATE = 500;
     if (current < target) return min(current + EASING_RATE, target);
     else return max(current - EASING_RATE, target);
 }

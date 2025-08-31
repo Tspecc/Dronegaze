@@ -26,7 +26,7 @@ const int PIN_MBR = 3;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;
 
-const int PWM_RESOLUTION = 14;
+const int PWM_RESOLUTION = 16;
 
 // Reduced stack sizes for smaller RAM
 const uint16_t FAST_TASK_STACK = 2048*2;
@@ -68,7 +68,7 @@ const int MOTOR_MIN = 1000;
 const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
-const int CORRECTION_LIMIT = 150;
+const int CORRECTION_LIMIT = 400;
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
 const float FLIP_ANGLE = 70.0f; // degrees; beyond this we cut motors
@@ -83,7 +83,7 @@ const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
 
 // ESC calibration is disabled by default to prevent unintended motor spin-ups.
 // Set to true when you explicitly want to calibrate ESCs on the next boot.
-const bool ENABLE_ESC_CALIBRATION = false;
+const bool ENABLE_ESC_CALIBRATION = true;
 
 bool failsafe_enable = 1;
 bool isArmed = 0;

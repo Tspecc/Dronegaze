@@ -4,7 +4,7 @@
 class ESC {
 public:
     ESC(int pin, int channel, uint32_t freq = 50, int resolution = 16);
-    void attach();
+    bool attach();
     void arm(int pulse = 1000);  // Default arm pulse
     void writeMicroseconds(int pulse); // 1000–2000 µs
     // Expose the real PWM frequency so callers can verify timing
