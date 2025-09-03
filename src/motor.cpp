@@ -12,8 +12,8 @@ static ESC escBR(0, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, MCPWM1B);
 void calibrate()
 {
     // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
-    escFL.writeMicroseconds(900); escFR.writeMicroseconds(900);
-    escBL.writeMicroseconds(900); escBR.writeMicroseconds(900);
+    escFL.writeMicroseconds(1); escFR.writeMicroseconds(1);
+    escBL.writeMicroseconds(1); escBR.writeMicroseconds(1);
     delay(3000);
 
     // standard ESC calibration: max then min throttle
