@@ -2,12 +2,11 @@
 
 namespace Motor {
 
-// Use dedicated MCPWM hardware timers for each motor output to ensure a
-// stable 50 Hz PWM signal with 1–2 ms pulse width.
-static ESC escFL(0, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM0A);
-static ESC escFR(0, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, MCPWM0B);
-static ESC escBL(0, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, MCPWM1A);
-static ESC escBR(0, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, MCPWM1B);
+// Use timer-based PWM outputs for each motor at 50 Hz with 1–2 ms pulses.
+static ESC escFL(0);
+static ESC escFR(0);
+static ESC escBL(0);
+static ESC escBR(0);
 
 void calibrate()
 {
@@ -33,17 +32,10 @@ void Outputs::constrainAll() {
 }
 
 void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
-
-    // Assign channels sequentially; this maps the motors to timers 0 and 1.
-    // Timer2 remains unused and is dedicated to the buzzer (channel 5).
-
-    // Keep channels sequential (0-3) so motors use only timers 0 and 1.
-    // This avoids sharing timer2 with the buzzer on channel 5 which can
-    // otherwise alter the motor PWM frequency.
-    escFL = ESC(pinFL, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM0A);
-    escFR = ESC(pinFR, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, MCPWM0B);
-    escBL = ESC(pinBL, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, MCPWM1A);
-    escBR = ESC(pinBR, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, MCPWM1B);
+    escFL = ESC(pinFL);
+    escFR = ESC(pinFR);
+    escBL = ESC(pinBL);
+    escBR = ESC(pinBR);
     escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
 }
 
