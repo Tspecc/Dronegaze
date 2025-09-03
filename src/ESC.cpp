@@ -19,16 +19,21 @@ void ESC::arm(int pulse) {
     writeMicroseconds(pulse);
 }
 
+static inline uint32_t clampu32(uint32_t v, uint32_t lo, uint32_t hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
 void ESC::writeMicroseconds(int pulse) {
   // Constrain the input value to the standard servo range
-  pulse = constrain(pulse, 500, 2500);
-  
+  pulse = clampu32(pulse, 500, 2500);
+  const uint32_t maxDuty = (1UL << _resolution) - 1UL;
+
   // Calculate the duty cycle value based on the chosen resolution
   // (2^resolution / (1/frequency*1000000)) * microseconds
-  int dutyCycle = (long)(pow(2, _resolution) * pulse) / 20000;
+   uint32_t duty = (pulse * maxDuty + (PWM_PERIOD_US / 2)) / PWM_PERIOD_US;
   
   // Write the new duty cycle to the LEDC channel
-  ledcWrite(_channel, dutyCycle);
+  ledcWrite(_channel, duty);
 }
 
 uint32_t ESC::frequency() const { return _freq; }

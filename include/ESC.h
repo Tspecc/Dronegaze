@@ -1,6 +1,6 @@
 #pragma once
 #include <Arduino.h>
-
+static const uint32_t PWM_PERIOD_US = 20000UL; // 1 / 50 Hz = 20 ms
 class ESC {
 public:
     ESC(int pin, int channel, uint32_t freq = 50, int resolution = 16);

@@ -17,6 +17,8 @@
 
 #define CONFIG_IDF_TARGET_ESP32C3
 
+
+
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 // ESP32-C3 Super Mini (RISC-V single core)
 const int PIN_MFL = 1; // MTL
@@ -508,20 +510,19 @@ void checkFailsafe() {
     // Arming / disarming logic
     if (!isArmed) {
         if (ilitePaired && command.arm_motors &&
-            command.throttle <= ARMING_THROTTLE &&
             fabs(pitch) < ARMING_ANGLE_LIMIT &&
             fabs(roll) < ARMING_ANGLE_LIMIT) {
             isArmed = true;
             beep(1200, 100);
         }
     } else {
-        bool keepArmed = command.arm_motors && command.throttle > ARMING_THROTTLE;
+        bool keepArmed = command.arm_motors;
         if (!keepArmed) {
             if (disarmStart == 0) disarmStart = millis();
             if (millis() - disarmStart > DISARM_DELAY) {
                 isArmed = false;
                 targetOutputs.MFL = targetOutputs.MFR = targetOutputs.MBL = targetOutputs.MBR = MOTOR_MIN;
-                beep(400, 200);
+                beep(600, 200);
             }
         } else {
             disarmStart = 0;
@@ -561,7 +562,7 @@ void FastTask(void *pvParameters) {
         int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         Motor::mix(base, pitchCorr, rollCorr, yawCorr, targetOutputs);
         Motor::update(isArmed, currentOutputs, targetOutputs);
-        vTaskDelay(pdMS_TO_TICKS(10)); // ~100 Hz (adjust to 1 kHz if needed)
+        vTaskDelay(pdMS_TO_TICKS(5)); // ~100 Hz (adjust to 1 kHz if needed)
     }
 }
 
@@ -618,7 +619,7 @@ void setup()
     // Initialize motor outputs
     Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION);
     if (ENABLE_ESC_CALIBRATION) {
-        // ESC calibration not implemented in modular version
+        Motor::calibrate();
     }
     Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
     ArduinoOTA.begin();

@@ -10,6 +10,14 @@ static ESC escFL(0,0,50,16), escFR(0,1,50,16), escBL(0,2,50,16), escBR(0,3,50,16
 
 static int pwmResolution = 16;
 
+void calibrate()
+{
+    escFL.arm(2000); escFR.arm(2000); escBL.arm(2000); escBR.arm(2000);
+    delay(2000);
+    escFL.arm(1000); escFR.arm(1000); escBL.arm(1000); escBR.arm(1000); 
+    delay(2000);
+}
+
 void Outputs::constrainAll() {
     MFL = constrain(MFL, 1000, 2000);
     MFR = constrain(MFR, 1000, 2000);
