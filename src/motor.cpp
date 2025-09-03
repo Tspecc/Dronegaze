@@ -2,19 +2,26 @@
 
 namespace Motor {
 
-// On the ESP32‑C3, LEDC channels are paired by timer: channels 0/1 use timer0
-// and 2/3 use timer1. Channels 4/5 use timer2. By keeping the motors on
-// channels 0‑3 we occupy timers 0 and 1 only, leaving timer2 free for the
-// buzzer on channel 5 so their frequencies cannot conflict.
-static ESC escFL(0,0,50,16), escFR(0,1,50,16), escBL(0,2,50,16), escBR(0,3,50,16);
-
-static int pwmResolution = 16;
+// Use dedicated MCPWM hardware timers for each motor output to ensure a
+// stable 50 Hz PWM signal with 1–2 ms pulse width.
+static ESC escFL(0, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM0A);
+static ESC escFR(0, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, MCPWM0B);
+static ESC escBL(0, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, MCPWM1A);
+static ESC escBR(0, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, MCPWM1B);
 
 void calibrate()
 {
-    escFL.arm(2000); escFR.arm(2000); escBL.arm(2000); escBR.arm(2000);
+    // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
+    escFL.writeMicroseconds(900); escFR.writeMicroseconds(900);
+    escBL.writeMicroseconds(900); escBR.writeMicroseconds(900);
+    delay(3000);
+
+    // standard ESC calibration: max then min throttle
+    escFL.writeMicroseconds(2000); escFR.writeMicroseconds(2000);
+    escBL.writeMicroseconds(2000); escBR.writeMicroseconds(2000);
     delay(2000);
-    escFL.arm(1000); escFR.arm(1000); escBL.arm(1000); escBR.arm(1000); 
+    escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
+    escBL.writeMicroseconds(1000); escBR.writeMicroseconds(1000);
     delay(2000);
 }
 
@@ -33,17 +40,11 @@ void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
     // Keep channels sequential (0-3) so motors use only timers 0 and 1.
     // This avoids sharing timer2 with the buzzer on channel 5 which can
     // otherwise alter the motor PWM frequency.
-    escFL = ESC(pinFL,0,50,pwmRes);
-    escFR = ESC(pinFR,1,50,pwmRes);
-    escBL = ESC(pinBL,2,50,pwmRes);
-    escBR = ESC(pinBR,3,50,pwmRes);
-    pwmResolution = pwmRes;
+    escFL = ESC(pinFL, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, MCPWM0A);
+    escFR = ESC(pinFR, MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_B, MCPWM0B);
+    escBL = ESC(pinBL, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, MCPWM1A);
+    escBR = ESC(pinBR, MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_B, MCPWM1B);
     escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
-    // Verify all ESC channels operate at the expected 50 Hz. Any drift is logged
-    if (escFL.frequency()!=50 || escFR.frequency()!=50 ||
-        escBL.frequency()!=50 || escBR.frequency()!=50) {
-        Serial.println("WARNING: PWM frequency mismatch detected");
-    }
 }
 
 int ease(int current, int target) {

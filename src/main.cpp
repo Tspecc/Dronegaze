@@ -7,6 +7,7 @@
 #include <EEPROM.h>
 #include <cstring>
 #include "comms.h"
+#include "commands.h"
 #include "pid.h"
 #include "control.h"
 #include "imu.h"
@@ -34,6 +35,7 @@ const int PWM_RESOLUTION = 16;
 const uint16_t FAST_TASK_STACK = 2048*2;
 const uint16_t COMM_TASK_STACK = 4096*2;
 const uint16_t FAILSAFE_TASK_STACK = 2048*2;
+const uint16_t TELEMETRY_TASK_STACK = 2048*2;
 const uint16_t OTA_TASK_STACK = 2048*2;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
 #else
@@ -48,6 +50,7 @@ const int PWM_RESOLUTION = 16;
 const uint16_t FAST_TASK_STACK = 4096;
 const uint16_t COMM_TASK_STACK = 8192;
 const uint16_t FAILSAFE_TASK_STACK = 2048;
+const uint16_t TELEMETRY_TASK_STACK = 4096;
 const uint16_t OTA_TASK_STACK = 2048;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
 #endif
@@ -83,10 +86,6 @@ const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
 const float rad_to_deg = 180.0 / PI;
 const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
 
-// ESC calibration is disabled by default to prevent unintended motor spin-ups.
-// Set to true when you explicitly want to calibrate ESCs on the next boot.
-const bool ENABLE_ESC_CALIBRATION = true;
-
 bool failsafe_enable = 1;
 bool isArmed = 0;
 
@@ -118,8 +117,6 @@ PIDController pitchPID, rollPID, yawPID;
 PIDController verticalAccelPID(VERTICAL_ACC_GAIN, 0.0, 5.0);
 
 // ==================== COMMUNICATION FUNCTIONS ====================
-unsigned long lastHeartbeat = 0;
-const unsigned long HEARTBEAT_INTERVAL = 1000; // 1 second
 // Time in ms before we consider the controller disconnected
 const unsigned long CONNECTION_TIMEOUT = 1000;
 // Minimum delay between handshake responses to avoid spamming
@@ -140,99 +137,6 @@ unsigned long lastDiscoveryTime = 0;
 
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
-
-void sendLine(const String &line)
-{
-    // Always send to Serial
-    Serial.println(line);
-
-    // Send to TCP client if connected
-    if (client && client.connected())
-    {
-        client.println(line);
-        client.flush(); // Ensure data is sent immediately
-    }
-}
-
-void sendHeartbeat()
-{
-    if (millis() - lastHeartbeat >= HEARTBEAT_INTERVAL)
-    {
-        lastHeartbeat = millis();
-        sendLine("HEARTBEAT:" + String(millis()));
-    }
-}
-
-void handleCommand(const String &cmd)
-{
-    String trimmed = cmd;
-    trimmed.trim();
-    if (trimmed.length() == 0)
-        return;
-
-    if (trimmed == "status")
-    {
-        sendLine("System: " + String(millis()) + "ms uptime");
-        sendLine("Pitch:" + String(pitch, 2) + " Roll:" + String(roll, 2) + " Yaw:" + String(yaw, 2));
-        sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "°");
-    }
-    else if(trimmed == "failsafe on"){failsafe_enable=1; sendLine("Enabled failsafe mode");}
-    else if(trimmed == "failsafe off"){failsafe_enable=0; sendLine("Disabled failsafe mode");}
-    else if(trimmed == "filters on"){enableFilters = true; sendLine("Enabled filters");}
-    else if(trimmed == "filters off"){enableFilters = false; sendLine("Disabled filters");}
-    else if(trimmed == "quadfilters on"){enableQuadFilters = true; sendLine("Enabled quad filters");}
-    else if(trimmed == "quadfilters off"){enableQuadFilters = false; sendLine("Disabled quad filters");}
-    else if (trimmed == "yawon")
-    {
-        yawControlEnabled = true;
-        yawSetpoint = yaw;
-        sendLine("ACK: Yaw control enabled");
-    }
-    else if (trimmed == "yawoff")
-    {
-        yawControlEnabled = false;
-        sendLine("ACK: Yaw control disabled");
-    }
-    else if (trimmed.startsWith("yaw "))
-    {
-        float newYawSetpoint = trimmed.substring(4).toFloat();
-        yawSetpoint = newYawSetpoint;
-        yawControlEnabled = true;
-        sendLine("ACK: Yaw setpoint set to " + String(yawSetpoint, 2) + "°");
-    }
-    else if (trimmed == "telemetry on")
-    {
-        telemetryEnabled = true;
-        sendLine("ACK: Telemetry enabled");
-    }
-    else if (trimmed == "telemetry off")
-    {
-        telemetryEnabled = false;
-        sendLine("ACK: Telemetry disabled");
-    }
-    else if (trimmed == "ping")
-    {
-        sendLine("PONG");
-    }
-    else if (trimmed == "arm")
-    {
-        isArmed = true;
-        Motor::update(isArmed, currentOutputs, targetOutputs);
-        delay(1000);
-        sendLine("ACK: Motors armed");
-    }
-    else if (trimmed == "disarm")
-    {
-        isArmed = false;
-        Motor::update(isArmed, currentOutputs, targetOutputs);
-        sendLine("ACK: Motors disarmed");
-    }
-    else
-    {
-        sendLine("ERROR: Unknown command");
-    }
-}
-
 
 void updateBuzzer()
 {
@@ -320,7 +224,7 @@ void handleIncomingData()
             if (client)
                 client.stop(); // Close old connection
             client = newClient;
-            sendLine("ACK: TCP client connected");
+            Commands::sendLine("ACK: TCP client connected");
         }
     }
 
@@ -332,7 +236,7 @@ void handleIncomingData()
         {
             if (messageBuffer.length() > 0)
             {
-                handleCommand(messageBuffer);
+                Commands::handleCommand(messageBuffer);
                 messageBuffer = "";
             }
         }
@@ -344,7 +248,7 @@ void handleIncomingData()
         {
             // Buffer overflow protection
             messageBuffer = "";
-            sendLine("ERROR: Message too long");
+            Commands::sendLine("ERROR: Message too long");
         }
     }
 
@@ -356,7 +260,7 @@ void handleIncomingData()
         {
             if (messageBuffer.length() > 0)
             {
-                handleCommand(messageBuffer);
+                Commands::handleCommand(messageBuffer);
                 messageBuffer = "";
             }
         }
@@ -368,7 +272,7 @@ void handleIncomingData()
         {
             // Buffer overflow protection
             messageBuffer = "";
-            sendLine("ERROR: Message too long");
+            Commands::sendLine("ERROR: Message too long");
         }
     }
 }
@@ -413,7 +317,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         }
 
 
-        else if (msg.type == Comms::ILITE_IDENTITY && !ilitePaired && now - lastHandshakeSent > HANDSHAKE_COOLDOWN)
+        else if (msg.type == Comms::ILITE_IDENTITY && !ilitePaired)
         {
             memcpy(iliteMac, msg.mac, 6);
             ilitePaired = true;
@@ -501,7 +405,7 @@ void checkFailsafe() {
 
         static unsigned long lastFailsafeMessage = 0;
         if (millis() - lastFailsafeMessage > 5000) {
-            sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
+            Commands::sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
             lastFailsafeMessage = millis();
         }
         return;
@@ -569,7 +473,6 @@ void FastTask(void *pvParameters) {
 void CommTask(void *pvParameters) {
     while (true) {
         handleIncomingData();
-        streamTelemetry();
         monitorConnection();
         if (!ilitePaired && millis() - lastDiscoveryTime > 1000) {
             Comms::IdentityMessage msg = {};
@@ -579,7 +482,7 @@ void CommTask(void *pvParameters) {
             esp_now_send(Comms::BroadcastMac, (uint8_t *)&msg, sizeof(msg));
             lastDiscoveryTime = millis();
         }
-        vTaskDelay(pdMS_TO_TICKS(5)); // ~20 Hz
+        vTaskDelay(pdMS_TO_TICKS(5)); // ~200 Hz for responsiveness
     }
 }
 
@@ -587,6 +490,13 @@ void FailsafeTask(void *pvParameters) {
     while (true) {
         checkFailsafe();
         vTaskDelay(pdMS_TO_TICKS(10)); // ~10 Hz
+    }
+}
+
+void TelemetryTask(void *pvParameters) {
+    while (true) {
+        streamTelemetry();
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -618,9 +528,7 @@ void setup()
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
     // Initialize motor outputs
     Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION);
-    if (ENABLE_ESC_CALIBRATION) {
-        Motor::calibrate();
-    }
+    Motor::calibrate();
     Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
     ArduinoOTA.begin();
     server.begin();
@@ -677,6 +585,15 @@ void setup()
         "FailsafeTask",
         FAILSAFE_TASK_STACK,
         1,
+        NULL,
+        1
+    );
+
+    CREATE_TASK(
+        TelemetryTask,
+        "TelemetryTask",
+        TELEMETRY_TASK_STACK,
+        2,
         NULL,
         1
     );
