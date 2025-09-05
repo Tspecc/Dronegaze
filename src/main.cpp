@@ -24,7 +24,7 @@
 // ESP32-C3 Super Mini (RISC-V single core)
 const int PIN_MFL = 1; // MTL
 const int PIN_MFR = 2; // MTR
-const int PIN_MBL = 10; // MBL
+const int PIN_MBL = 0; // MBL
 const int PIN_MBR = 3;  // MBR
 const int BUZZER_PIN = 6;
 const uint32_t CPU_FREQ_MHZ = 160;

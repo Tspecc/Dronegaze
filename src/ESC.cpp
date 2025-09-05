@@ -30,7 +30,7 @@ static inline uint32_t clampu32(uint32_t v, uint32_t lo, uint32_t hi) {
 }
 
 void ESC::writeMicroseconds(int pulse) {
-    _pulse = clampu32(pulse, 900, 2000); // allow sub-1ms for disarming
+    _pulse = clampu32(pulse, 0, 2000); // allow sub-1ms for disarming
 }
 
 uint32_t ESC::frequency() const { return _freq; }
