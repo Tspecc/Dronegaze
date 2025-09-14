@@ -20,7 +20,7 @@ const int PIN_MFL = 14;
 const int PIN_MFR = 27;
 const int PIN_MBL = 26;
 const int PIN_MBR = 25;
-const int BUZZER_PIN = -1; // No buzzer by default
+const int BUZZER_PIN = 13; // No buzzer by default
 const uint32_t CPU_FREQ_MHZ = 240;
 const uint16_t FAST_TASK_STACK = 4096;
 const uint16_t COMM_TASK_STACK = 8192;
@@ -509,6 +509,16 @@ void setup()
     } //50:78:7D:45:D9:F0 new mac
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
+
+ Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
+    ArduinoOTA.begin();
+    server.begin();
+    WiFi.macAddress(selfMac);
+
+    esp_now_register_recv_cb(onReceive);
+    Serial.println("ESP-NOW initialized");
+    Serial.println("OTA service started");
+
     // Initialize motor outputs
     if (!Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR)) {
         Serial.println("Motor init failed");
@@ -521,14 +531,7 @@ void setup()
     // ensure motors are disarmed after calibration
     command.throttle = THROTTLE_MIN;
     Motor::update(false, currentOutputs, targetOutputs);
-    Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
-    ArduinoOTA.begin();
-    server.begin();
-    WiFi.macAddress(selfMac);
-
-    esp_now_register_recv_cb(onReceive);
-    Serial.println("ESP-NOW initialized");
-    Serial.println("OTA service started");
+   
 
     // Initialize IMU
     IMU::init();

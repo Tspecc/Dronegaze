@@ -18,11 +18,11 @@ bool ESC::attach() {
     cfg.duty_mode = MCPWM_DUTY_MODE_0;
     mcpwm_init(_unit, _timer, &cfg);
 
-    writeMicroseconds(900); // ensure disarmed on start
+    writeMicroseconds(0); // ensure disarmed on start
     return true;
 }
 
 void ESC::writeMicroseconds(int pulse) {
-    pulse = constrain(pulse, 900, 2000);
+    pulse = constrain(pulse, 0, 2000);
     mcpwm_set_duty_in_us(_unit, _timer, _gen, pulse);
 }
