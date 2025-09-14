@@ -1,30 +1,21 @@
 #pragma once
 #include <Arduino.h>
-#include <esp_timer.h>
 
 /*
- * ESC driver using high‑resolution timer interrupts.
- * Generates a 50 Hz PWM signal with 1–2 ms pulse width by
- * toggling the output pin in esp_timer callbacks. Sub‑1 ms
- * pulses are allowed for disarming and calibration routines.
+ * ESC driver using hardware LEDC PWM for stable 50 Hz output.
+ * Each instance controls one LEDC channel and timer to generate
+ * 1–2 ms pulses required by standard RC ESCs. Sub-1 ms pulses
+ * are permitted for disarming and calibration.
  */
-
 class ESC {
 public:
-    explicit ESC(int pin, uint32_t freq = 50);
+    ESC(int pin, int channel, uint32_t freq = 50, uint8_t resolution = 16);
     bool attach();
-    void arm(int pulse = 1000);
     void writeMicroseconds(int pulse); // constrained to 900–2000 µs
-    uint32_t frequency() const;
-
 private:
-    static void onPeriod(void *arg);
-    static void onOff(void *arg);
-
     int _pin;
+    int _channel;
     uint32_t _freq;
-    esp_timer_handle_t _periodic;
-    esp_timer_handle_t _offTimer;
-    volatile uint32_t _pulse;
+    uint8_t _resolution;
+    uint32_t _period_us;
 };
-
