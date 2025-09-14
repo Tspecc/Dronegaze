@@ -7,6 +7,10 @@ ESC::ESC(int pin, int channel, uint32_t freq, uint8_t resolution)
 
 bool ESC::attach() {
     // Configure the LEDC channel and attach the pin. Return false on failure.
+
+    pinMode(_pin, OUTPUT);
+    digitalWrite(_pin, LOW);
+
     if (ledcSetup(_channel, _freq, _resolution) == 0) {
         return false;
     }

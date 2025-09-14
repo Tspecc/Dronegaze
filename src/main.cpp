@@ -17,7 +17,9 @@
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
 
+#ifndef CONFIG_IDF_TARGET_ESP32C3
 #define CONFIG_IDF_TARGET_ESP32C3
+#endif
 
 
 
@@ -64,6 +66,34 @@ const uint16_t BUZZER_TASK_STACK = 1024;
 // occupy. This prevents the buzzer from changing the motors' 50 Hz PWM.
 
 const int BUZZER_CHANNEL = 5;
+
+// Configure all GPIOs to a known safe state. Unused pins are set to
+// INPUT_PULLDOWN to avoid floating levels, while motor and buzzer pins are
+// driven low before their peripherals are attached.
+void configurePins()
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    for (int pin = 0; pin <= 21; ++pin)
+    {
+        pinMode(pin, INPUT_PULLDOWN);
+    }
+#else
+    for (int pin = 0; pin <= 39; ++pin)
+    {
+        pinMode(pin, INPUT_PULLDOWN);
+    }
+#endif
+    const int pins[] = {PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, BUZZER_PIN};
+    for (int i = 0; i < 5; ++i)
+    {
+        int p = pins[i];
+        if (p >= 0)
+        {
+            pinMode(p, OUTPUT);
+            digitalWrite(p, LOW);
+        }
+    }
+}
 
 
 /// ==================== CONSTANTS ====================
@@ -517,6 +547,7 @@ void OTATask(void *pvParameters) {
 
 void setup()
 {
+    configurePins();
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
     if (BUZZER_PIN >= 0) {
