@@ -1,21 +1,24 @@
 #pragma once
 #include <Arduino.h>
+#include <driver/mcpwm.h>
 
 /*
- * ESC driver using hardware LEDC PWM for stable 50 Hz output.
- * Each instance controls one LEDC channel and timer to generate
- * 1–2 ms pulses required by standard RC ESCs. Sub-1 ms pulses
- * are permitted for disarming and calibration.
+ * ESC driver using the ESP32 MCPWM hardware timers for stable 50 Hz output.
+ * Each instance controls one MCPWM generator to produce 1–2 ms pulses
+ * required by standard RC ESCs. Sub-1 ms pulses are permitted for
+ * disarming and calibration.
  */
 class ESC {
 public:
-    ESC(int pin, int channel, uint32_t freq = 50, uint8_t resolution = 16);
+    ESC(mcpwm_unit_t unit, mcpwm_timer_t timer, mcpwm_generator_t gen,
+        int pin, uint32_t freq = 50);
     bool attach();
     void writeMicroseconds(int pulse); // constrained to 900–2000 µs
+
 private:
+    mcpwm_unit_t _unit;
+    mcpwm_timer_t _timer;
+    mcpwm_generator_t _gen;
     int _pin;
-    int _channel;
     uint32_t _freq;
-    uint8_t _resolution;
-    uint32_t _period_us;
 };
