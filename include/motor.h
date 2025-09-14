@@ -8,7 +8,7 @@ struct Outputs {
     void constrainAll();
 };
 
-bool init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes);
+bool init(int pinFL, int pinFR, int pinBL, int pinBR);
 void mix(int base, int pitchCorr, int rollCorr, int yawCorr, Outputs &target);
 void update(bool isArmed, Outputs &current, const Outputs &target);
 void calibrate();

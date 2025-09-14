@@ -1,23 +1,28 @@
 #include "ESC.h"
 
-ESC::ESC(int pin, int channel, uint32_t freq, uint8_t resolution)
-    : _pin(pin), _channel(channel), _freq(freq), _resolution(resolution) {
-    _period_us = 1000000UL / _freq;
-}
+ESC::ESC(mcpwm_unit_t unit, mcpwm_timer_t timer, mcpwm_generator_t gen,
+         int pin, uint32_t freq)
+    : _unit(unit), _timer(timer), _gen(gen), _pin(pin), _freq(freq) {}
 
 bool ESC::attach() {
-    // Configure the LEDC channel and attach the pin. Return false on failure.
-    if (ledcSetup(_channel, _freq, _resolution) == 0) {
-        return false;
-    }
-    ledcAttachPin(_pin, _channel);
+    // Select the appropriate MCPWM output signal for the timer/generator pair
+    mcpwm_io_signals_t signal = static_cast<mcpwm_io_signals_t>(
+        MCPWM0A + static_cast<int>(_timer) * 2 + (_gen == MCPWM_GEN_B));
+    mcpwm_gpio_init(_unit, signal, _pin);
+
+    mcpwm_config_t cfg;
+    cfg.frequency = _freq;
+    cfg.cmpr_a = 0; // duty cycle of generator A
+    cfg.cmpr_b = 0; // duty cycle of generator B
+    cfg.counter_mode = MCPWM_UP_COUNTER;
+    cfg.duty_mode = MCPWM_DUTY_MODE_0;
+    mcpwm_init(_unit, _timer, &cfg);
+
     writeMicroseconds(900); // ensure disarmed on start
     return true;
 }
 
 void ESC::writeMicroseconds(int pulse) {
     pulse = constrain(pulse, 900, 2000);
-    uint32_t duty_max = (1UL << _resolution) - 1;
-    uint32_t duty = (static_cast<uint32_t>(pulse) * duty_max) / _period_us;
-    ledcWrite(_channel, duty);
+    mcpwm_set_duty_in_us(_unit, _timer, _gen, pulse);
 }

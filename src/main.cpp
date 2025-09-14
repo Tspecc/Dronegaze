@@ -15,40 +15,13 @@
 #include "motor.h"
 
 // ==================== BOARD CONFIGURATION ====================
-// Select pin mappings and task sizes based on target board
-
-#define CONFIG_IDF_TARGET_ESP32C3
-
-
-
-#if defined(CONFIG_IDF_TARGET_ESP32C3)
-// ESP32-C3 Super Mini (RISC-V single core)
-const int PIN_MFL = 1; // MTL
-const int PIN_MFR = 2; // MTR
-const int PIN_MBL = 0; // MBL
-const int PIN_MBR = 3;  // MBR
-const int BUZZER_PIN = 6;
-const uint32_t CPU_FREQ_MHZ = 160;
-
-const int PWM_RESOLUTION = 16;
-
-// Reduced stack sizes for smaller RAM
-const uint16_t FAST_TASK_STACK = 2048*2;
-const uint16_t COMM_TASK_STACK = 4096*2;
-const uint16_t FAILSAFE_TASK_STACK = 2048*2;
-const uint16_t TELEMETRY_TASK_STACK = 2048*2;
-const uint16_t OTA_TASK_STACK = 2048*2;
-const uint16_t BUZZER_TASK_STACK = 1024*2;
-#define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreate(fn, name, stack, NULL, prio, handle)
-#else
-// Default ESP32 (e.g., NodeMCU-32S)
+// Default ESP32 (e.g., NodeMCU-32S) pin mappings and task sizes
 const int PIN_MFL = 14;
 const int PIN_MFR = 27;
 const int PIN_MBL = 26;
 const int PIN_MBR = 25;
 const int BUZZER_PIN = -1; // No buzzer by default
 const uint32_t CPU_FREQ_MHZ = 240;
-const int PWM_RESOLUTION = 16;
 const uint16_t FAST_TASK_STACK = 4096;
 const uint16_t COMM_TASK_STACK = 8192;
 const uint16_t FAILSAFE_TASK_STACK = 2048;
@@ -56,12 +29,10 @@ const uint16_t TELEMETRY_TASK_STACK = 4096;
 const uint16_t OTA_TASK_STACK = 2048;
 const uint16_t BUZZER_TASK_STACK = 1024;
 #define CREATE_TASK(fn, name, stack, prio, handle, core) xTaskCreatePinnedToCore(fn, name, stack, NULL, prio, handle, core)
-#endif
 
 
-// Use LEDC channel 5 for the buzzer. Channels are paired by timer on the
-// ESP32‑C3 (0/1, 2/3, 4/5), so channel 5 uses timer2 which none of the motors
-// occupy. This prevents the buzzer from changing the motors' 50 Hz PWM.
+// Use LEDC channel 5 for an optional buzzer. This channel operates
+// independently of the MCPWM timers driving the motors.
 
 const int BUZZER_CHANNEL = 5;
 
@@ -539,7 +510,7 @@ void setup()
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
     // Initialize motor outputs
-    if (!Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION)) {
+    if (!Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR)) {
         Serial.println("Motor init failed");
         while (true) {
             beep(2000, 500);

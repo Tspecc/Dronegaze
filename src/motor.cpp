@@ -2,11 +2,11 @@
 
 namespace Motor {
 
-// Use hardware LEDC channels for stable 50 Hz PWM pulses.
-static ESC escFL(0, 0);
-static ESC escFR(0, 1);
-static ESC escBL(0, 2);
-static ESC escBR(0, 3);
+// Use ESP32 MCPWM hardware timers for stable 50 Hz PWM pulses.
+static ESC escFL(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, 0);
+static ESC escFR(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, 0);
+static ESC escBL(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_A, 0);
+static ESC escBR(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, 0);
 
 void calibrate()
 {
@@ -36,11 +36,11 @@ void Outputs::constrainAll() {
     MBR = constrain(MBR, 1000, 2000);
 }
 
-bool init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
-    escFL = ESC(pinFL, 0, 50, pwmRes);
-    escFR = ESC(pinFR, 1, 50, pwmRes);
-    escBL = ESC(pinBL, 2, 50, pwmRes);
-    escBR = ESC(pinBR, 3, 50, pwmRes);
+bool init(int pinFL, int pinFR, int pinBL, int pinBR) {
+    escFL = ESC(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, pinFL);
+    escFR = ESC(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, pinFR);
+    escBL = ESC(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_A, pinBL);
+    escBR = ESC(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, pinBR);
     bool ok = escFL.attach();
     ok = escFR.attach() && ok;
     ok = escBL.attach() && ok;
