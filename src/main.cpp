@@ -17,7 +17,9 @@
 // ==================== BOARD CONFIGURATION ====================
 // Select pin mappings and task sizes based on target board
 
+#ifndef CONFIG_IDF_TARGET_ESP32C3
 #define CONFIG_IDF_TARGET_ESP32C3
+#endif
 
 
 
@@ -64,6 +66,34 @@ const uint16_t BUZZER_TASK_STACK = 1024;
 // occupy. This prevents the buzzer from changing the motors' 50 Hz PWM.
 
 const int BUZZER_CHANNEL = 5;
+
+// Configure all GPIOs to a known safe state. Unused pins are set to
+// INPUT_PULLDOWN to avoid floating levels, while motor and buzzer pins are
+// driven low before their peripherals are attached.
+void configurePins()
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    for (int pin = 0; pin <= 21; ++pin)
+    {
+        pinMode(pin, INPUT_PULLDOWN);
+    }
+#else
+    for (int pin = 0; pin <= 39; ++pin)
+    {
+        pinMode(pin, INPUT_PULLDOWN);
+    }
+#endif
+    const int pins[] = {PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, BUZZER_PIN};
+    for (int i = 0; i < 5; ++i)
+    {
+        int p = pins[i];
+        if (p >= 0)
+        {
+            pinMode(p, OUTPUT);
+            digitalWrite(p, LOW);
+        }
+    }
+}
 
 
 /// ==================== CONSTANTS ====================
@@ -442,11 +472,13 @@ void checkFailsafe() {
 // ==================== SETUP ====================
 
 void FastTask(void *pvParameters) {
+    TickType_t lastWake = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(1); // 1 kHz control loop
     while (true) {
         IMU::update();
         pitch = IMU::pitch();
-       roll = IMU::roll();
-       yaw = IMU::yaw();
+        roll = IMU::roll();
+        yaw = IMU::yaw();
         // If the craft tilts beyond the safe angle while armed, immediately disarm
         if (isArmed && (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE)) {
             isArmed = false;
@@ -471,7 +503,7 @@ void FastTask(void *pvParameters) {
         int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         Motor::mix(base, pitchCorr, rollCorr, yawCorr, targetOutputs);
         Motor::update(isArmed, currentOutputs, targetOutputs);
-        vTaskDelay(pdMS_TO_TICKS(5)); // ~100 Hz (adjust to 1 kHz if needed)
+        vTaskDelayUntil(&lastWake, interval);
     }
 }
 
@@ -515,6 +547,7 @@ void OTATask(void *pvParameters) {
 
 void setup()
 {
+    configurePins();
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
     if (BUZZER_PIN >= 0) {
@@ -537,8 +570,17 @@ void setup()
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
     // Initialize motor outputs
-    Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION);
+    if (!Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR, PWM_RESOLUTION)) {
+        Serial.println("Motor init failed");
+        while (true) {
+            beep(2000, 500);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
     Motor::calibrate();
+    // ensure motors are disarmed after calibration
+    command.throttle = THROTTLE_MIN;
+    Motor::update(false, currentOutputs, targetOutputs);
     Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
     ArduinoOTA.begin();
     server.begin();
@@ -576,7 +618,7 @@ void setup()
         FastTask,
         "FastTask",
         FAST_TASK_STACK,
-        3,
+        5,
         NULL,
         1
     );
@@ -585,7 +627,7 @@ void setup()
         CommTask,
         "CommTask",
         COMM_TASK_STACK,
-        4,
+        3,
         NULL,
         1 // Core 0 — use Core 0 for Wi-Fi tasks to avoid conflicts
     );
