@@ -51,6 +51,9 @@ const int CORRECTION_LIMIT = 400;
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
 const float FLIP_ANGLE = 70.0f; // degrees; beyond this we cut motors
+const float TIPOVER_ANGLE = 55.0f; // degrees; sustained tilt before shutdown
+const unsigned long TIPOVER_DURATION = 1000; // ms tilt must persist before disarm
+const float COMMAND_BIAS_LIMIT = 10.0f; // allowed setpoint tilt before considering intentional
 const float ARMING_ANGLE_LIMIT = 15.0f; // max tilt allowed to arm
 const int ARMING_THROTTLE = THROTTLE_MIN + 50; // throttle must stay below to arm/disarm
 const unsigned long DISARM_DELAY = 1000; // ms throttle-low before disarm
@@ -85,6 +88,7 @@ float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
 bool yawControlEnabled = false;
 unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
+unsigned long tipoverStart = 0;
 String incomingCommand = "";
 QueueHandle_t buzzerQueue = nullptr;
 
@@ -420,9 +424,29 @@ void FastTask(void *pvParameters) {
         pitch = IMU::pitch();
         roll = IMU::roll();
         yaw = IMU::yaw();
-        // If the craft tilts beyond the safe angle while armed, immediately disarm
+
+        // Shut down the motors if a steep tilt persists without being commanded.
+        bool bias = fabs(pitchSetpoint) > COMMAND_BIAS_LIMIT ||
+                    fabs(rollSetpoint) > COMMAND_BIAS_LIMIT;
+        bool steep = fabs(pitch) > TIPOVER_ANGLE || fabs(roll) > TIPOVER_ANGLE;
+        if (isArmed && steep && !bias) {
+            if (!tipoverStart) tipoverStart = millis();
+            else if (millis() - tipoverStart > TIPOVER_DURATION) {
+                isArmed = false;
+                tipoverStart = 0;
+                beep(1000, 200);
+                Motor::update(false, currentOutputs, targetOutputs);
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+        } else {
+            tipoverStart = 0;
+        }
+
+        // If the craft tilts far beyond the safe angle while armed, immediately disarm
         if (isArmed && (fabs(pitch) > FLIP_ANGLE || fabs(roll) > FLIP_ANGLE)) {
             isArmed = false;
+            tipoverStart = 0;
             beep(1000, 200);
             Motor::update(false, currentOutputs, targetOutputs);
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -442,6 +466,11 @@ void FastTask(void *pvParameters) {
         int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         int rollCorr = constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+        if (base <= THROTTLE_MIN) {
+            pitchCorr = 0;
+            rollCorr = 0;
+            yawCorr = 0;
+        }
         Motor::mix(base, pitchCorr, rollCorr, yawCorr, targetOutputs);
         Motor::update(isArmed, currentOutputs, targetOutputs);
         vTaskDelayUntil(&lastWake, interval);

@@ -13,6 +13,7 @@ public:
     ESC(mcpwm_unit_t unit, mcpwm_timer_t timer, mcpwm_generator_t gen,
         int pin, uint32_t freq = 50);
     bool attach();
+    void detach();
     void writeMicroseconds(int pulse); // constrained to 900–2000 µs
 
 private:

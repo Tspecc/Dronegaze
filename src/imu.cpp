@@ -74,8 +74,8 @@ void update() {
     float worldZ = cos(rollRad)*cos(pitchRad)*az_ms2 +
                    sin(rollRad)*cos(pitchRad)*ay_ms2 -
                    sin(pitchRad)*ax_ms2;
-    // Flip sign so positive values correspond to upward acceleration.
-    g_verticalAcc = -(worldZ - 9.81f) - verticalAccOffset;
+    // Positive values correspond to upward acceleration.
+    g_verticalAcc = (worldZ - 9.81f) - verticalAccOffset;
 }
 
 void zero() {

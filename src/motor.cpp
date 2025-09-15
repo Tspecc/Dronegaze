@@ -10,6 +10,11 @@ static ESC escBR(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, 0);
 
 void calibrate()
 {
+    // Put PWM outputs in high-impedance before starting calibration
+    escFL.detach(); escFR.detach(); escBL.detach(); escBR.detach();
+    delay(20); // allow pins to float
+    escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
+
     // Hold motors in a disarmed state to ensure props are removed
     escFL.writeMicroseconds(900); escFR.writeMicroseconds(900);
     escBL.writeMicroseconds(900); escBR.writeMicroseconds(900);
