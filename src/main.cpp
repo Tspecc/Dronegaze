@@ -57,6 +57,7 @@ const float COMMAND_BIAS_LIMIT = 10.0f; // allowed setpoint tilt before consider
 const float ARMING_ANGLE_LIMIT = 15.0f; // max tilt allowed to arm
 const int ARMING_THROTTLE = THROTTLE_MIN + 50; // throttle must stay below to arm/disarm
 const unsigned long DISARM_DELAY = 1000; // ms throttle-low before disarm
+const int THROTTLE_CHANGE_THRESHOLD = 30; // units change to consider throttle movement
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
@@ -91,6 +92,7 @@ unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
 String incomingCommand = "";
 QueueHandle_t buzzerQueue = nullptr;
+int lastThrottle = THROTTLE_MIN;
 
 // Legacy PID controllers retained for OLED tuning interface (unused)
 PIDController pitchPID, rollPID, yawPID;
@@ -452,11 +454,14 @@ void FastTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                              command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+        lastThrottle = command.throttle;
         ControlOutputs ctrlOut;
         computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                            pitch, roll, yaw,
                            IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                           IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+                           IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
         rollCorrection = ctrlOut.roll;
         pitchCorrection = ctrlOut.pitch;
         yawCorrection = ctrlOut.yaw;
@@ -576,11 +581,14 @@ void setup()
 
     Serial.println("System ready for flight!");
     delay(300);
+    bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                          command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+    lastThrottle = command.throttle;
     ControlOutputs ctrlOut;
     computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                        pitch, roll, yaw,
                        IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                       IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+                       IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
     rollCorrection = ctrlOut.roll;
     pitchCorrection = ctrlOut.pitch;
     yawCorrection = ctrlOut.yaw;
