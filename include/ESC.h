@@ -14,6 +14,7 @@ public:
         int pin, uint32_t freq = 50);
     bool attach();
     void writeMicroseconds(int pulse); // constrained to 900–2000 µs
+    void writeMicrosecondsUnconstrained(int pulse);
 
 private:
     mcpwm_unit_t _unit;
