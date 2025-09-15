@@ -18,5 +18,6 @@ void computeCorrections(float pitchSetpoint,
                         float gyroY,
                         float gyroZ,
                         float verticalAcc,
+                        bool throttleStable,
                         bool yawEnabled,
                         ControlOutputs &out);
