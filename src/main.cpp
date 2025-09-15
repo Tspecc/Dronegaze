@@ -20,7 +20,7 @@ const int PIN_MFL = 14;
 const int PIN_MFR = 27;
 const int PIN_MBL = 26;
 const int PIN_MBR = 25;
-const int BUZZER_PIN = -1; // No buzzer by default
+const int BUZZER_PIN = 13; // No buzzer by default
 const uint32_t CPU_FREQ_MHZ = 240;
 const uint16_t FAST_TASK_STACK = 4096;
 const uint16_t COMM_TASK_STACK = 8192;
@@ -47,16 +47,19 @@ const int MOTOR_MIN = 1000;
 const int MOTOR_MAX = 2000;
 const int THROTTLE_MIN = 1000;
 const int THROTTLE_MAX = 2000;
-const int CORRECTION_LIMIT = 400;
+const int CORRECTION_LIMIT = 600;
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
-const float FLIP_ANGLE = 70.0f; // degrees; beyond this we cut motors
-const float TIPOVER_ANGLE = 55.0f; // degrees; sustained tilt before shutdown
-const unsigned long TIPOVER_DURATION = 1000; // ms tilt must persist before disarm
+
+const float FLIP_ANGLE = 48.0f; // degrees; beyond this we cut motors
+const float TIPOVER_ANGLE = 36.0f; // degrees; sustained tilt before shutdown
+const unsigned long TIPOVER_DURATION = 700; // ms tilt must persist before disarm
+
 const float COMMAND_BIAS_LIMIT = 10.0f; // allowed setpoint tilt before considering intentional
 const float ARMING_ANGLE_LIMIT = 15.0f; // max tilt allowed to arm
 const int ARMING_THROTTLE = THROTTLE_MIN + 50; // throttle must stay below to arm/disarm
 const unsigned long DISARM_DELAY = 1000; // ms throttle-low before disarm
+const int THROTTLE_CHANGE_THRESHOLD = 30; // units change to consider throttle movement
 
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
@@ -91,6 +94,7 @@ unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
 String incomingCommand = "";
 QueueHandle_t buzzerQueue = nullptr;
+int lastThrottle = THROTTLE_MIN;
 
 // Legacy PID controllers retained for OLED tuning interface (unused)
 PIDController pitchPID, rollPID, yawPID;
@@ -452,11 +456,14 @@ void FastTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                              command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+        lastThrottle = command.throttle;
         ControlOutputs ctrlOut;
         computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                            pitch, roll, yaw,
                            IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                           IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+                           IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
         rollCorrection = ctrlOut.roll;
         pitchCorrection = ctrlOut.pitch;
         yawCorrection = ctrlOut.yaw;
@@ -538,6 +545,16 @@ void setup()
     } //50:78:7D:45:D9:F0 new mac
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
+
+ Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
+    ArduinoOTA.begin();
+    server.begin();
+    WiFi.macAddress(selfMac);
+
+    esp_now_register_recv_cb(onReceive);
+    Serial.println("ESP-NOW initialized");
+    Serial.println("OTA service started");
+
     // Initialize motor outputs
     if (!Motor::init(PIN_MFL, PIN_MFR, PIN_MBL, PIN_MBR)) {
         Serial.println("Motor init failed");
@@ -550,14 +567,7 @@ void setup()
     // ensure motors are disarmed after calibration
     command.throttle = THROTTLE_MIN;
     Motor::update(false, currentOutputs, targetOutputs);
-    Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
-    ArduinoOTA.begin();
-    server.begin();
-    WiFi.macAddress(selfMac);
-
-    esp_now_register_recv_cb(onReceive);
-    Serial.println("ESP-NOW initialized");
-    Serial.println("OTA service started");
+   
 
     // Initialize IMU
     IMU::init();
@@ -573,11 +583,14 @@ void setup()
 
     Serial.println("System ready for flight!");
     delay(300);
+    bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                          command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+    lastThrottle = command.throttle;
     ControlOutputs ctrlOut;
     computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                        pitch, roll, yaw,
                        IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                       IMU::verticalAcc(), yawControlEnabled, ctrlOut);
+                       IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
     rollCorrection = ctrlOut.roll;
     pitchCorrection = ctrlOut.pitch;
     yawCorrection = ctrlOut.yaw;
