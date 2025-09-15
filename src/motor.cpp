@@ -11,17 +11,14 @@ static ESC escBR(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, 50);
 void calibrate()
 {
     // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
-    escFL.writeMicroseconds(0); escFR.writeMicroseconds(0);
-    escBL.writeMicroseconds(0); escBR.writeMicroseconds(0);
-    delay(5000);
+    // escFL.writeMicroseconds(0); escFR.writeMicroseconds(0);
+    // escBL.writeMicroseconds(0); escBR.writeMicroseconds(0);
+    // delay(1000);
 
     // standard ESC calibration: max then min throttle
-    escFL.writeMicroseconds(2000); escFR.writeMicroseconds(2000);
-    escBL.writeMicroseconds(2000); escBR.writeMicroseconds(2000);
-    delay(1000);
     escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
     escBL.writeMicroseconds(1000); escBR.writeMicroseconds(1000);
-    delay(1000);
+    delay(3000);
 }
 
 void Outputs::constrainAll() {
