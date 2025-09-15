@@ -30,5 +30,5 @@ void computeCorrections(float pitchSetpoint,
     out.roll  = ANGLE_KP * rollError  - RATE_KD * gyroX;
     out.pitch = ANGLE_KP * pitchError - RATE_KD * gyroY;
     out.yaw   = yawEnabled ? ANGLE_KP * yawError - RATE_KD * gyroZ : 0.0f;
-    out.vertical = throttleStable ? -VERT_KP * verticalAcc : 0.0f;
+    out.vertical = throttleStable ? VERT_KP * verticalAcc : 0.0f;
 }

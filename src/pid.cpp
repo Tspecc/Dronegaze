@@ -48,6 +48,6 @@ void updatePIDControllers(float pitchSetpoint,
         yawPID.reset();
         out.yaw = 0;
     }
-    out.vertical = verticalAccelPID.compute(-verticalAcc, 0.01f);
+    out.vertical = verticalAccelPID.compute(verticalAcc, 0.01f);
 }
 
