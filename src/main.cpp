@@ -90,6 +90,7 @@ Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 float pitch = 0, roll = 0, yaw = 0;
 float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
 float verticalCorrection = 0;
+float pitchBias = 0.0f, rollBias = 0.0f, yawBias = 0.0f;
 float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
 bool yawControlEnabled = false;
 bool stabilizationEnabled = true;
@@ -563,9 +564,9 @@ void FastTask(void *pvParameters) {
         yaw = IMU::yaw();
 
         Comms::ThrustCommand currentCommand = loadCommandSnapshot();
-        pitchSetpoint = currentCommand.pitchAngle;
-        rollSetpoint = currentCommand.rollAngle;
-        yawSetpoint = currentCommand.yawAngle;
+        pitchSetpoint = currentCommand.pitchAngle + pitchBias;
+        rollSetpoint = currentCommand.rollAngle + rollBias;
+        yawSetpoint = currentCommand.yawAngle + yawBias;
 
         // Shut down the motors if a steep tilt persists without being commanded.
         bool bias = fabs(pitchSetpoint) > COMMAND_BIAS_LIMIT ||
