@@ -7,7 +7,6 @@ static ThrustCommand lastCmd = {0};
 static uint8_t controllerMac[6] = {0};
 const uint8_t BroadcastMac[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 
-
 static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len) {
     if (len == sizeof(IdentityMessage) && !g_paired) {
         const IdentityMessage* msg = reinterpret_cast<const IdentityMessage*>(incomingData);
@@ -33,7 +32,7 @@ static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len)
             g_paired = true;
             return;
         }
-    } 
+    }
     if (len == sizeof(ThrustCommand)) {
         const ThrustCommand* cmd = reinterpret_cast<const ThrustCommand*>(incomingData);
         lastCmd = *cmd;
@@ -41,22 +40,40 @@ static void onDataRecv(const uint8_t* mac, const uint8_t* incomingData, int len)
     }
 }
 
-void init(const char *ssid, const char *password, int tcpPort) {
+static bool initInternal(const char *ssid, const char *password, int tcpPort, esp_now_recv_cb_t recvCallback) {
+    (void)tcpPort;
     // Run in AP+STA mode so ESP-NOW remains operational alongside SoftAP
     WiFi.mode(WIFI_AP_STA);
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
     WiFi.setSleep(false);
     WiFi.softAP(ssid, password);
 
-    esp_now_init();
+    if (esp_now_init() != ESP_OK) {
+        return false;
+    }
 
     esp_now_peer_info_t peerInfo{};
     memcpy(peerInfo.peer_addr, BroadcastMac, 6);
     peerInfo.channel = 0;
     peerInfo.encrypt = false;
-    esp_now_add_peer(&peerInfo);
+    if (!esp_now_is_peer_exist(BroadcastMac)) {
+        esp_now_add_peer(&peerInfo);
+    }
+
+    esp_now_register_recv_cb(recvCallback ? recvCallback : onDataRecv);
 
     g_paired = false;
+    memset(controllerMac, 0, sizeof(controllerMac));
+    memset(&lastCmd, 0, sizeof(lastCmd));
+    return true;
+}
+
+bool init(const char *ssid, const char *password, int tcpPort) {
+    return initInternal(ssid, password, tcpPort, nullptr);
+}
+
+bool init(const char *ssid, const char *password, int tcpPort, esp_now_recv_cb_t recvCallback) {
+    return initInternal(ssid, password, tcpPort, recvCallback);
 }
 
 bool receiveCommand(ThrustCommand &cmd) {
