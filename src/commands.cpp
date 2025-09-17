@@ -5,6 +5,7 @@
 extern WiFiClient client;
 extern float pitch, roll, yaw;
 extern float yawSetpoint;
+extern float pitchBias, rollBias, yawBias;
 extern bool yawControlEnabled;
 extern bool enableFilters;
 extern bool enableQuadFilters;
@@ -46,6 +47,7 @@ void handleCommand(const String &cmd) {
         sendLine("System: " + String(millis()) + "ms uptime");
         sendLine("Pitch:" + String(pitch, 2) + " Roll:" + String(roll, 2) + " Yaw:" + String(yaw, 2));
         sendLine("Yaw Setpoint: " + String(yawSetpoint, 2) + "\xC2\xB0");
+        sendLine("Bias Pitch:" + String(pitchBias, 2) + " Roll:" + String(rollBias, 2) + " Yaw:" + String(yawBias, 2));
     } else if(trimmed == "failsafe on"){failsafe_enable=1; sendLine("Enabled failsafe mode");}
     else if(trimmed == "failsafe off"){failsafe_enable=0; sendLine("Disabled failsafe mode");}
     else if(trimmed == "filters on"){enableFilters = true; sendLine("Enabled filters");}
@@ -59,6 +61,15 @@ void handleCommand(const String &cmd) {
     } else if (trimmed == "yawoff") {
         yawControlEnabled = false;
         sendLine("ACK: Yaw control disabled");
+    } else if (trimmed.startsWith("pitchbias ")) {
+        pitchBias = trimmed.substring(10).toFloat();
+        sendLine("ACK: Pitch bias set to " + String(pitchBias, 2) + "\xC2\xB0");
+    } else if (trimmed.startsWith("rollbias ")) {
+        rollBias = trimmed.substring(9).toFloat();
+        sendLine("ACK: Roll bias set to " + String(rollBias, 2) + "\xC2\xB0");
+    } else if (trimmed.startsWith("yawbias ")) {
+        yawBias = trimmed.substring(8).toFloat();
+        sendLine("ACK: Yaw bias set to " + String(yawBias, 2) + "\xC2\xB0");
     } else if (trimmed.startsWith("yaw ")) {
         float newYawSetpoint = trimmed.substring(4).toFloat();
         yawSetpoint = newYawSetpoint;
