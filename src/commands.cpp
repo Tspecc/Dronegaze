@@ -14,6 +14,7 @@ extern bool serialActive;
 extern bool isArmed;
 extern Motor::Outputs currentOutputs;
 extern Motor::Outputs targetOutputs;
+extern bool stabilizationEnabled;
 
 namespace Commands {
 
@@ -80,6 +81,12 @@ void handleCommand(const String &cmd) {
         isArmed = false;
         Motor::update(isArmed, currentOutputs, targetOutputs);
         sendLine("ACK: Motors disarmed");
+    } else if (trimmed.equalsIgnoreCase("stabilization on")) {
+        stabilizationEnabled = true;
+        sendLine("ACK: Stabilization enabled");
+    } else if (trimmed.equalsIgnoreCase("stabilization off")) {
+        stabilizationEnabled = false;
+        sendLine("ACK: Stabilization disabled");
     } else {
         sendLine("ERROR: Unknown command");
     }
