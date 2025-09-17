@@ -92,6 +92,7 @@ float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
 float verticalCorrection = 0;
 float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
 bool yawControlEnabled = false;
+bool stabilizationEnabled = true;
 unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
 QueueHandle_t buzzerQueue = nullptr;
@@ -596,20 +597,29 @@ void FastTask(void *pvParameters) {
         bool throttleStable = abs((int)currentCommand.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
                               currentCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
         lastThrottle = currentCommand.throttle;
-        ControlOutputs ctrlOut;
-        computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                           pitch, roll, yaw,
-                           IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                           IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
-        rollCorrection = ctrlOut.roll;
-        pitchCorrection = ctrlOut.pitch;
-        yawCorrection = ctrlOut.yaw;
-        verticalCorrection = ctrlOut.vertical;
+        ControlOutputs ctrlOut{};
+        if (stabilizationEnabled) {
+            computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                               pitch, roll, yaw,
+                               IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                               IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+            rollCorrection = ctrlOut.roll;
+            pitchCorrection = ctrlOut.pitch;
+            yawCorrection = ctrlOut.yaw;
+            verticalCorrection = ctrlOut.vertical;
+        } else {
+            rollCorrection = 0.0f;
+            pitchCorrection = 0.0f;
+            yawCorrection = 0.0f;
+            verticalCorrection = 0.0f;
+        }
         int base = constrain(currentCommand.throttle, THROTTLE_MIN, THROTTLE_MAX);
-        base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
-        int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-        int rollCorr = constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
-        int yawCorr = constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
+        if (stabilizationEnabled) {
+            base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
+        }
+        int pitchCorr = stabilizationEnabled ? constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
+        int rollCorr = stabilizationEnabled ? constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
+        int yawCorr = stabilizationEnabled ? constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
         if (base <= THROTTLE_MIN) {
             pitchCorr = 0;
             rollCorr = 0;
@@ -737,15 +747,22 @@ void setup()
     bool throttleStable = abs((int)startupCommand.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
                           startupCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
     lastThrottle = startupCommand.throttle;
-    ControlOutputs ctrlOut;
-    computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                       pitch, roll, yaw,
-                       IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                       IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
-    rollCorrection = ctrlOut.roll;
-    pitchCorrection = ctrlOut.pitch;
-    yawCorrection = ctrlOut.yaw;
-    verticalCorrection = ctrlOut.vertical;
+    ControlOutputs ctrlOut{};
+    if (stabilizationEnabled) {
+        computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                           pitch, roll, yaw,
+                           IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                           IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+        rollCorrection = ctrlOut.roll;
+        pitchCorrection = ctrlOut.pitch;
+        yawCorrection = ctrlOut.yaw;
+        verticalCorrection = ctrlOut.vertical;
+    } else {
+        rollCorrection = 0.0f;
+        pitchCorrection = 0.0f;
+        yawCorrection = 0.0f;
+        verticalCorrection = 0.0f;
+    }
 
     CREATE_TASK(
         FastTask,
