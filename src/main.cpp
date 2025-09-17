@@ -5,7 +5,10 @@
 #include <WiFiClient.h>
 #include <esp_now.h>
 #include <EEPROM.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <freertos/task.h>
+#include <freertos/portmacro.h>
 #include <cstring>
 #include "comms.h"
 #include "commands.h"
@@ -80,6 +83,8 @@ struct BuzzerCommand { uint16_t freq; uint16_t duration; };
 WiFiServer server(TCP_PORT);
 WiFiClient client;
 Comms::ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
+portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE commsStateMux = portMUX_INITIALIZER_UNLOCKED;
 Motor::Outputs currentOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 float pitch = 0, roll = 0, yaw = 0;
@@ -87,10 +92,8 @@ float pitchCorrection = 0, rollCorrection = 0, yawCorrection = 0;
 float verticalCorrection = 0;
 float pitchSetpoint = 0, rollSetpoint = 0, yawSetpoint = 0; // angle targets
 bool yawControlEnabled = false;
-unsigned long lastCommandTime = 0;
 unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
-String incomingCommand = "";
 QueueHandle_t buzzerQueue = nullptr;
 int lastThrottle = THROTTLE_MIN;
 
@@ -105,20 +108,164 @@ const unsigned long CONNECTION_TIMEOUT = 1000;
 const unsigned long HANDSHAKE_COOLDOWN = 500;
 unsigned long lastHandshakeSent = 0;
 bool telemetryEnabled = false; // Serial/TCP telemetry disabled by default
-String messageBuffer = "";
 const int MAX_MESSAGE_LENGTH = 256;
+char messageBuffer[MAX_MESSAGE_LENGTH + 1] = {0};
+size_t messageLength = 0;
 bool serialActive = false; // Tracks if a Serial session is currently open
 
 // Dynamic ESP-NOW pairing
-uint8_t iliteMac[6];
+static uint8_t iliteMac[6] = {0};
 uint8_t selfMac[6];
-bool ilitePaired = false;
-uint8_t commandPeer[6];
-bool commandPeerSet = false;
+static uint8_t commandPeer[6] = {0};
+static bool ilitePaired = false;
+static bool commandPeerSet = false;
+static uint32_t lastCommandTimeMs = 0;
 unsigned long lastDiscoveryTime = 0;
 
 
 // ==================== IMPROVED COMMUNICATION FUNCTIONS ====================
+
+struct LinkStateSnapshot {
+    bool ilitePaired = false;
+    bool commandPeerSet = false;
+    uint8_t iliteMac[6] = {0};
+    uint8_t commandPeer[6] = {0};
+    uint32_t lastCommandTimeMs = 0;
+};
+
+static inline Comms::ThrustCommand loadCommandSnapshot()
+{
+    portENTER_CRITICAL(&commandMux);
+    Comms::ThrustCommand snapshot = command;
+    portEXIT_CRITICAL(&commandMux);
+    return snapshot;
+}
+
+static inline void storeCommandSnapshot(const Comms::ThrustCommand &value)
+{
+    portENTER_CRITICAL(&commandMux);
+    command = value;
+    portEXIT_CRITICAL(&commandMux);
+}
+
+static inline void storeCommandSnapshotFromISR(const Comms::ThrustCommand &value)
+{
+    portENTER_CRITICAL_ISR(&commandMux);
+    command = value;
+    portEXIT_CRITICAL_ISR(&commandMux);
+}
+
+static inline LinkStateSnapshot loadLinkStateSnapshot()
+{
+    LinkStateSnapshot snapshot;
+    portENTER_CRITICAL(&commsStateMux);
+    snapshot.ilitePaired = ilitePaired;
+    snapshot.commandPeerSet = commandPeerSet;
+    memcpy(snapshot.iliteMac, iliteMac, sizeof(iliteMac));
+    memcpy(snapshot.commandPeer, commandPeer, sizeof(commandPeer));
+    snapshot.lastCommandTimeMs = lastCommandTimeMs;
+    portEXIT_CRITICAL(&commsStateMux);
+    return snapshot;
+}
+
+static inline void setLastCommandTimeMs(uint32_t value)
+{
+    portENTER_CRITICAL(&commsStateMux);
+    lastCommandTimeMs = value;
+    portEXIT_CRITICAL(&commsStateMux);
+}
+
+static inline void setLastCommandTimeMsFromISR(uint32_t value)
+{
+    portENTER_CRITICAL_ISR(&commsStateMux);
+    lastCommandTimeMs = value;
+    portEXIT_CRITICAL_ISR(&commsStateMux);
+}
+
+static inline void setIlitePeerFromISR(const uint8_t *mac)
+{
+    portENTER_CRITICAL_ISR(&commsStateMux);
+    memcpy(iliteMac, mac, sizeof(iliteMac));
+    ilitePaired = true;
+    portEXIT_CRITICAL_ISR(&commsStateMux);
+}
+
+static inline bool copyIliteMacFromISR(uint8_t dest[6])
+{
+    portENTER_CRITICAL_ISR(&commsStateMux);
+    bool paired = ilitePaired;
+    if (paired)
+    {
+        memcpy(dest, iliteMac, sizeof(iliteMac));
+    }
+    portEXIT_CRITICAL_ISR(&commsStateMux);
+    return paired;
+}
+
+static inline bool updateCommandPeerFromISR(const uint8_t *mac)
+{
+    portENTER_CRITICAL_ISR(&commsStateMux);
+    bool changed = !commandPeerSet || memcmp(commandPeer, mac, sizeof(commandPeer)) != 0;
+    if (changed)
+    {
+        memcpy(commandPeer, mac, sizeof(commandPeer));
+        commandPeerSet = true;
+    }
+    portEXIT_CRITICAL_ISR(&commsStateMux);
+    return changed;
+}
+
+static inline LinkStateSnapshot clearLinkState()
+{
+    LinkStateSnapshot previous;
+    portENTER_CRITICAL(&commsStateMux);
+    previous.ilitePaired = ilitePaired;
+    previous.commandPeerSet = commandPeerSet;
+    memcpy(previous.iliteMac, iliteMac, sizeof(iliteMac));
+    memcpy(previous.commandPeer, commandPeer, sizeof(commandPeer));
+    previous.lastCommandTimeMs = lastCommandTimeMs;
+    ilitePaired = false;
+    commandPeerSet = false;
+    memset(iliteMac, 0, sizeof(iliteMac));
+    memset(commandPeer, 0, sizeof(commandPeer));
+    lastCommandTimeMs = 0;
+    portEXIT_CRITICAL(&commsStateMux);
+    return previous;
+}
+
+static inline void resetMessageBuffer()
+{
+    messageLength = 0;
+    messageBuffer[0] = '\0';
+}
+
+static void dispatchBufferedMessage()
+{
+    if (messageLength == 0)
+        return;
+
+    messageBuffer[messageLength] = '\0';
+    Commands::handleCommand(String(messageBuffer));
+    resetMessageBuffer();
+}
+
+static void handleBufferedCharacter(char c)
+{
+    if (c == '\n' || c == '\r')
+    {
+        dispatchBufferedMessage();
+        return;
+    }
+
+    if (messageLength < MAX_MESSAGE_LENGTH)
+    {
+        messageBuffer[messageLength++] = c;
+        return;
+    }
+
+    resetMessageBuffer();
+    Commands::sendLine("ERROR: Message too long");
+}
 
 void beep(uint16_t freq, uint16_t duration)
 {
@@ -146,26 +293,30 @@ void streamTelemetry()
 
     lastTelemetry = millis();
 
+    Comms::ThrustCommand currentCommand = loadCommandSnapshot();
+    LinkStateSnapshot linkState = loadLinkStateSnapshot();
+    uint32_t commandAge = (linkState.lastCommandTimeMs > 0) ? (millis() - linkState.lastCommandTimeMs) : 0;
+
     Comms::TelemetryPacket packet = {
         PACKET_MAGIC,
         pitch, roll, yaw,
         pitchCorrection, rollCorrection, yawCorrection,
-        (uint16_t)command.throttle,
-        command.pitchAngle, command.rollAngle, command.yawAngle,
+        (uint16_t)currentCommand.throttle,
+        currentCommand.pitchAngle, currentCommand.rollAngle, currentCommand.yawAngle,
         IMU::verticalAcc(),
-        (uint32_t)(millis() - lastCommandTime)
+        commandAge
     };
 
     // Send telemetry to ILITE ground station if paired
-    if (ilitePaired)
+    if (linkState.ilitePaired)
     {
-        esp_now_send(iliteMac, (uint8_t *)&packet, sizeof(packet));
+        esp_now_send(linkState.iliteMac, (uint8_t *)&packet, sizeof(packet));
     }
 
     // Also send to the last command peer if different
-    if (commandPeerSet && (!ilitePaired || memcmp(commandPeer, iliteMac, 6) != 0))
+    if (linkState.commandPeerSet && (!linkState.ilitePaired || memcmp(linkState.commandPeer, linkState.iliteMac, 6) != 0))
     {
-        esp_now_send(commandPeer, (uint8_t *)&packet, sizeof(packet));
+        esp_now_send(linkState.commandPeer, (uint8_t *)&packet, sizeof(packet));
     }
 
     bool tcpActive = client && client.connected();
@@ -174,9 +325,9 @@ void streamTelemetry()
 
     String telemetry = "DB:" + String(pitch, 2) + " " + String(roll, 2) + " " + String(yaw, 2) + " " +
                        String(pitchCorrection, 2) + " " + String(rollCorrection, 2) + " " + String(yawCorrection, 2) + " " +
-                       String(command.throttle) + " " + String(command.pitchAngle) + " " +
-                       String(command.rollAngle) + " " + String(command.yawAngle) + " " +
-                       String(IMU::verticalAcc(), 2) + " " + String(millis() - lastCommandTime);
+                       String(currentCommand.throttle) + " " + String(currentCommand.pitchAngle) + " " +
+                       String(currentCommand.rollAngle) + " " + String(currentCommand.yawAngle) + " " +
+                       String(IMU::verticalAcc(), 2) + " " + String(commandAge);
 
     if (serialActive)
         Serial.println(telemetry);
@@ -215,58 +366,31 @@ void handleIncomingData()
     while (client && client.available())
     {
         char c = client.read();
-        if (c == '\n' || c == '\r')
-        {
-            if (messageBuffer.length() > 0)
-            {
-                Commands::handleCommand(messageBuffer);
-                messageBuffer = "";
-            }
-        }
-        else if (messageBuffer.length() < MAX_MESSAGE_LENGTH)
-        {
-            messageBuffer += c;
-        }
-        else
-        {
-            // Buffer overflow protection
-            messageBuffer = "";
-            Commands::sendLine("ERROR: Message too long");
-        }
+        handleBufferedCharacter(c);
     }
 
     // Process Serial data with buffering
     while (Serial.available())
     {
         char c = Serial.read();
-        if (c == '\n' || c == '\r')
-        {
-            if (messageBuffer.length() > 0)
-            {
-                Commands::handleCommand(messageBuffer);
-                messageBuffer = "";
-            }
-        }
-        else if (messageBuffer.length() < MAX_MESSAGE_LENGTH)
-        {
-            messageBuffer += c;
-        }
-        else
-        {
-            // Buffer overflow protection
-            messageBuffer = "";
-            Commands::sendLine("ERROR: Message too long");
-        }
+        handleBufferedCharacter(c);
     }
 }
 
 // Detect dropped connections and cleanup peers
 void monitorConnection() {
-    if (ilitePaired && millis() - lastCommandTime > CONNECTION_TIMEOUT) {
-        ilitePaired = false;
-        commandPeerSet = false;
-        esp_now_del_peer(iliteMac);
-        memset(iliteMac, 0, sizeof(iliteMac));
+    LinkStateSnapshot state = loadLinkStateSnapshot();
+    if (!state.ilitePaired)
+        return;
+
+    uint32_t now = millis();
+    if (state.lastCommandTimeMs > 0 && now - state.lastCommandTimeMs > CONNECTION_TIMEOUT)
+    {
+        LinkStateSnapshot cleared = clearLinkState();
+        if (cleared.ilitePaired)
+        {
+            esp_now_del_peer(cleared.iliteMac);
+        }
     }
 }
 
@@ -300,10 +424,16 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         }
 
 
-        else if (msg.type == Comms::ILITE_IDENTITY && !ilitePaired)
+        else if (msg.type == Comms::ILITE_IDENTITY)
         {
-            memcpy(iliteMac, msg.mac, 6);
-            ilitePaired = true;
+            uint8_t existingMac[6];
+            bool wasPaired = copyIliteMacFromISR(existingMac);
+            bool isNewPeer = !wasPaired || memcmp(existingMac, msg.mac, sizeof(existingMac)) != 0;
+            if (isNewPeer)
+            {
+                setIlitePeerFromISR(msg.mac);
+                updateCommandPeerFromISR(msg.mac);
+            }
             esp_now_peer_info_t peerInfo = {};
             memcpy(peerInfo.peer_addr, msg.mac, 6);
             peerInfo.channel = 0;
@@ -318,7 +448,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             memcpy(ack.mac, selfMac, 6);
             esp_now_send(msg.mac, (uint8_t *)&ack, sizeof(ack));
             lastHandshakeSent = now;
-            if (BUZZER_PIN >= 0)
+            if (BUZZER_PIN >= 0 && isNewPeer)
             {
                 beep(2000, 200); // short beep on pairing
             }
@@ -333,17 +463,20 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
         memcpy(&incoming, incomingData, sizeof(incoming));
 
         // Ignore commands from unknown devices or with wrong magic
-        if (!ilitePaired || memcmp(mac, iliteMac, 6) != 0 || incoming.magic != PACKET_MAGIC)
+        uint8_t pairedMac[6];
+        bool paired = copyIliteMacFromISR(pairedMac);
+        if (!paired || memcmp(mac, pairedMac, 6) != 0 || incoming.magic != PACKET_MAGIC)
         {
             return;
         }
 
-        command = incoming;
-        lastCommandTime = millis();
+        storeCommandSnapshotFromISR(incoming);
+        uint32_t nowMs = xTaskGetTickCountFromISR() * portTICK_PERIOD_MS;
+        setLastCommandTimeMsFromISR(nowMs);
 
-        if (!commandPeerSet || memcmp(commandPeer, mac, 6) != 0)
+        bool peerChanged = updateCommandPeerFromISR(mac);
+        if (peerChanged)
         {
-            memcpy(commandPeer, mac, 6);
             esp_now_peer_info_t peerInfo = {};
             memcpy(peerInfo.peer_addr, mac, 6);
             peerInfo.channel = 0;
@@ -352,13 +485,7 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
             {
                 esp_now_add_peer(&peerInfo);
             }
-            commandPeerSet = true;
         }
-
-        // Update angle setpoints from command
-        pitchSetpoint = command.pitchAngle;
-        rollSetpoint = command.rollAngle;
-        yawSetpoint = command.yawAngle;
     }
 }
 
@@ -368,11 +495,17 @@ void checkFailsafe() {
     if (!failsafe_enable) return;
 
     // Connection-loss failsafe
-    if (millis() - lastCommandTime > FAILSAFE_TIMEOUT) {
-        command.throttle = THROTTLE_MIN;
-        command.pitchAngle = 0;
-        command.rollAngle = 0;
-        command.yawAngle = yaw; // hold current yaw on failsafe
+    LinkStateSnapshot linkState = loadLinkStateSnapshot();
+    Comms::ThrustCommand currentCommand = loadCommandSnapshot();
+    uint32_t nowMs = millis();
+    uint32_t lastCommandMs = linkState.lastCommandTimeMs;
+
+    if (lastCommandMs == 0 || nowMs - lastCommandMs > FAILSAFE_TIMEOUT) {
+        currentCommand.throttle = THROTTLE_MIN;
+        currentCommand.pitchAngle = 0;
+        currentCommand.rollAngle = 0;
+        currentCommand.yawAngle = yaw; // hold current yaw on failsafe
+        storeCommandSnapshot(currentCommand);
         pitchSetpoint = rollSetpoint = 0;
         yawSetpoint = yaw;
         yawControlEnabled = false;
@@ -387,7 +520,8 @@ void checkFailsafe() {
 
         static unsigned long lastFailsafeMessage = 0;
         if (millis() - lastFailsafeMessage > 5000) {
-            Commands::sendLine("FAILSAFE: No commands received for " + String(millis() - lastCommandTime) + "ms");
+            uint32_t age = (lastCommandMs > 0) ? (millis() - lastCommandMs) : 0;
+            Commands::sendLine("FAILSAFE: No commands received for " + String(age) + "ms");
             lastFailsafeMessage = millis();
         }
         return;
@@ -395,14 +529,14 @@ void checkFailsafe() {
 
     // Arming / disarming logic
     if (!isArmed) {
-        if (ilitePaired && command.arm_motors &&
+        if (linkState.ilitePaired && currentCommand.arm_motors &&
             fabs(pitch) < ARMING_ANGLE_LIMIT &&
             fabs(roll) < ARMING_ANGLE_LIMIT) {
             isArmed = true;
             beep(1200, 100);
         }
     } else {
-        bool keepArmed = command.arm_motors;
+        bool keepArmed = currentCommand.arm_motors;
         if (!keepArmed) {
             if (disarmStart == 0) disarmStart = millis();
             if (millis() - disarmStart > DISARM_DELAY) {
@@ -426,6 +560,11 @@ void FastTask(void *pvParameters) {
         pitch = IMU::pitch();
         roll = IMU::roll();
         yaw = IMU::yaw();
+
+        Comms::ThrustCommand currentCommand = loadCommandSnapshot();
+        pitchSetpoint = currentCommand.pitchAngle;
+        rollSetpoint = currentCommand.rollAngle;
+        yawSetpoint = currentCommand.yawAngle;
 
         // Shut down the motors if a steep tilt persists without being commanded.
         bool bias = fabs(pitchSetpoint) > COMMAND_BIAS_LIMIT ||
@@ -454,9 +593,9 @@ void FastTask(void *pvParameters) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
-        bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
-                              command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
-        lastThrottle = command.throttle;
+        bool throttleStable = abs((int)currentCommand.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                              currentCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+        lastThrottle = currentCommand.throttle;
         ControlOutputs ctrlOut;
         computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                            pitch, roll, yaw,
@@ -466,7 +605,7 @@ void FastTask(void *pvParameters) {
         pitchCorrection = ctrlOut.pitch;
         yawCorrection = ctrlOut.yaw;
         verticalCorrection = ctrlOut.vertical;
-        int base = constrain(command.throttle, THROTTLE_MIN, THROTTLE_MAX);
+        int base = constrain(currentCommand.throttle, THROTTLE_MIN, THROTTLE_MAX);
         base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
         int pitchCorr = constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
         int rollCorr = constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT);
@@ -483,10 +622,13 @@ void FastTask(void *pvParameters) {
 }
 
 void CommTask(void *pvParameters) {
+    TickType_t lastWake = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(5);
     while (true) {
         handleIncomingData();
         monitorConnection();
-        if (!ilitePaired && millis() - lastDiscoveryTime > 1000) {
+        LinkStateSnapshot state = loadLinkStateSnapshot();
+        if (!state.ilitePaired && millis() - lastDiscoveryTime > 1000) {
             Comms::IdentityMessage msg = {};
             msg.type = Comms::DRONE_IDENTITY;
             strncpy(msg.identity, DRONE_ID, sizeof(msg.identity));
@@ -494,21 +636,25 @@ void CommTask(void *pvParameters) {
             esp_now_send(Comms::BroadcastMac, (uint8_t *)&msg, sizeof(msg));
             lastDiscoveryTime = millis();
         }
-        vTaskDelay(pdMS_TO_TICKS(5)); // ~200 Hz for responsiveness
+        vTaskDelayUntil(&lastWake, interval); // ~200 Hz for responsiveness
     }
 }
 
 void FailsafeTask(void *pvParameters) {
+    TickType_t lastWake = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(10);
     while (true) {
         checkFailsafe();
-        vTaskDelay(pdMS_TO_TICKS(10)); // ~10 Hz
+        vTaskDelayUntil(&lastWake, interval); // ~10 Hz
     }
 }
 
 void TelemetryTask(void *pvParameters) {
+    TickType_t lastWake = xTaskGetTickCount();
+    const TickType_t interval = pdMS_TO_TICKS(10);
     while (true) {
         streamTelemetry();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelayUntil(&lastWake, interval);
     }
 }
 
@@ -544,12 +690,16 @@ void setup()
 
     setCpuFrequencyMhz(CPU_FREQ_MHZ);
 
- Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT);
+    if (!Comms::init(WIFI_SSID, WIFI_PASSWORD, TCP_PORT, onReceive)) {
+        Serial.println("ESP-NOW init failed");
+        while (true) {
+            beep(2000, 500);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
     ArduinoOTA.begin();
     server.begin();
     WiFi.macAddress(selfMac);
-
-    esp_now_register_recv_cb(onReceive);
     Serial.println("ESP-NOW initialized");
     Serial.println("OTA service started");
 
@@ -563,7 +713,9 @@ void setup()
     }
     Motor::calibrate();
     // ensure motors are disarmed after calibration
-    command.throttle = THROTTLE_MIN;
+    Comms::ThrustCommand initialCommand = loadCommandSnapshot();
+    initialCommand.throttle = THROTTLE_MIN;
+    storeCommandSnapshot(initialCommand);
     Motor::update(false, currentOutputs, targetOutputs);
    
 
@@ -572,7 +724,7 @@ void setup()
     pitch = IMU::pitch();
     roll = IMU::roll();
     yaw = IMU::yaw();
-    lastCommandTime = millis();
+    setLastCommandTimeMs(millis());
 
     // Initialize setpoints to current orientation
     pitchSetpoint = 0;
@@ -581,9 +733,10 @@ void setup()
 
     Serial.println("System ready for flight!");
     delay(300);
-    bool throttleStable = abs(command.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
-                          command.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
-    lastThrottle = command.throttle;
+    Comms::ThrustCommand startupCommand = loadCommandSnapshot();
+    bool throttleStable = abs((int)startupCommand.throttle - lastThrottle) <= THROTTLE_CHANGE_THRESHOLD &&
+                          startupCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
+    lastThrottle = startupCommand.throttle;
     ControlOutputs ctrlOut;
     computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
                        pitch, roll, yaw,
@@ -609,7 +762,7 @@ void setup()
         COMM_TASK_STACK,
         3,
         NULL,
-        1 // Core 0 — use Core 0 for Wi-Fi tasks to avoid conflicts
+        0 // Pin to core 0 for Wi-Fi operations
     );
 
     CREATE_TASK(
@@ -627,7 +780,7 @@ void setup()
         TELEMETRY_TASK_STACK,
         2,
         NULL,
-        1
+        0
     );
 
     CREATE_TASK(
