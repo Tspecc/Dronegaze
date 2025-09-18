@@ -53,9 +53,11 @@ const int THROTTLE_MAX = 2000;
 const int CORRECTION_LIMIT = 600;
 const unsigned long FAILSAFE_TIMEOUT = 200;  // ms
 const unsigned long TELEMETRY_INTERVAL = 50; // ms
+
 const float FLIP_ANGLE = 48.0f; // degrees; beyond this we cut motors
 const float TIPOVER_ANGLE = 36.0f; // degrees; sustained tilt before shutdown
 const unsigned long TIPOVER_DURATION = 700; // ms tilt must persist before disarm
+
 const float COMMAND_BIAS_LIMIT = 10.0f; // allowed setpoint tilt before considering intentional
 const float ARMING_ANGLE_LIMIT = 15.0f; // max tilt allowed to arm
 const int ARMING_THROTTLE = THROTTLE_MIN + 50; // throttle must stay below to arm/disarm

@@ -1,4 +1,5 @@
 #include "ESC.h"
+#include <driver/gpio.h>
 
 ESC::ESC(mcpwm_unit_t unit, mcpwm_timer_t timer, mcpwm_generator_t gen,
          int pin, uint32_t freq)
@@ -20,6 +21,11 @@ bool ESC::attach() {
 
     writeMicroseconds(0); // ensure disarmed on start
     return true;
+}
+
+void ESC::detach() {
+    mcpwm_stop(_unit, _timer);
+    gpio_reset_pin(static_cast<gpio_num_t>(_pin));
 }
 
 void ESC::writeMicroseconds(int pulse) {

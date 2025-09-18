@@ -10,13 +10,16 @@ static ESC escBR(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, 50);
 
 void calibrate()
 {
-    // // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
-    // escFL.writeMicrosecondsUnconstrained(0); escFR.writeMicrosecondsUnconstrained(0);
-    // escBL.writeMicrosecondsUnconstrained(0); escBR.writeMicrosecondsUnconstrained(0);
-    // delay(5000);
-    // escFL.writeMicroseconds(2000); escFR.writeMicroseconds(2000);
-    // escBL.writeMicroseconds(2000); escBR.writeMicroseconds(2000);
-    // delay(2000);
+
+//    escFL.detach(); escFR.detach(); escBL.detach(); escBR.detach();
+  //  delay(20); // allow pins to float
+    //escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
+
+    // Hold motors in a disarmed state to ensure props are removed
+    //escFL.writeMicroseconds(900); escFR.writeMicroseconds(900);
+    //escBL.writeMicroseconds(900); escBR.writeMicroseconds(900);
+    //delay(3000);
+
 
     // // standard ESC calibration: max then min throttle
     // escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
