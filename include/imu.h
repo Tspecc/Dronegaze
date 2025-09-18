@@ -5,6 +5,7 @@ namespace IMU {
 void init();
 void update();
 void zero();
+void applyOffsetFromCurrent();
 float pitch();
 float roll();
 float yaw();
