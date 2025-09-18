@@ -16,6 +16,7 @@ extern bool isArmed;
 extern Motor::Outputs currentOutputs;
 extern Motor::Outputs targetOutputs;
 extern bool stabilizationEnabled;
+extern bool requestIMUZero();
 
 namespace Commands {
 
@@ -75,6 +76,13 @@ void handleCommand(const String &cmd) {
         yawSetpoint = newYawSetpoint;
         yawControlEnabled = true;
         sendLine("ACK: Yaw setpoint set to " + String(yawSetpoint, 2) + "\xC2\xB0");
+    } else if (trimmed.equalsIgnoreCase("imu zero")) {
+        bool queued = requestIMUZero();
+        if (queued) {
+            sendLine("ACK: IMU zero requested");
+        } else {
+            sendLine("WARN: IMU zero already pending");
+        }
     } else if (trimmed == "telemetry on") {
         telemetryEnabled = true;
         sendLine("ACK: Telemetry enabled");

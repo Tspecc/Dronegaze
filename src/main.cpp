@@ -85,6 +85,7 @@ WiFiClient client;
 Comms::ThrustCommand command = {PACKET_MAGIC, THROTTLE_MIN, 0, 0, 0, false};
 portMUX_TYPE commandMux = portMUX_INITIALIZER_UNLOCKED;
 portMUX_TYPE commsStateMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE imuZeroMux = portMUX_INITIALIZER_UNLOCKED;
 Motor::Outputs currentOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 Motor::Outputs targetOutputs{MOTOR_MIN, MOTOR_MIN, MOTOR_MIN, MOTOR_MIN};
 float pitch = 0, roll = 0, yaw = 0;
@@ -98,6 +99,7 @@ unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
 QueueHandle_t buzzerQueue = nullptr;
 int lastThrottle = THROTTLE_MIN;
+static volatile bool imuZeroRequested = false;
 
 // Legacy PID controllers retained for OLED tuning interface (unused)
 PIDController pitchPID, rollPID, yawPID;
@@ -155,6 +157,32 @@ static inline void storeCommandSnapshotFromISR(const Comms::ThrustCommand &value
     portENTER_CRITICAL_ISR(&commandMux);
     command = value;
     portEXIT_CRITICAL_ISR(&commandMux);
+}
+
+bool requestIMUZero()
+{
+    bool queued = false;
+    portENTER_CRITICAL(&imuZeroMux);
+    if (!imuZeroRequested)
+    {
+        imuZeroRequested = true;
+        queued = true;
+    }
+    portEXIT_CRITICAL(&imuZeroMux);
+    return queued;
+}
+
+static bool takeIMUZeroRequest()
+{
+    bool pending = false;
+    portENTER_CRITICAL(&imuZeroMux);
+    if (imuZeroRequested)
+    {
+        imuZeroRequested = false;
+        pending = true;
+    }
+    portEXIT_CRITICAL(&imuZeroMux);
+    return pending;
 }
 
 static inline LinkStateSnapshot loadLinkStateSnapshot()
@@ -559,6 +587,11 @@ void FastTask(void *pvParameters) {
     const TickType_t interval = pdMS_TO_TICKS(1); // 1 kHz control loop
     while (true) {
         IMU::update();
+        bool zeroApplied = false;
+        if (takeIMUZeroRequest()) {
+            IMU::applyOffsetFromCurrent();
+            zeroApplied = true;
+        }
         pitch = IMU::pitch();
         roll = IMU::roll();
         yaw = IMU::yaw();
@@ -567,6 +600,10 @@ void FastTask(void *pvParameters) {
         pitchSetpoint = currentCommand.pitchAngle + pitchBias;
         rollSetpoint = currentCommand.rollAngle + rollBias;
         yawSetpoint = currentCommand.yawAngle + yawBias;
+
+        if (zeroApplied) {
+            Commands::sendLine("ACK: IMU zero complete");
+        }
 
         // Shut down the motors if a steep tilt persists without being commanded.
         bool bias = fabs(pitchSetpoint) > COMMAND_BIAS_LIMIT ||
