@@ -12,7 +12,6 @@
 #include <cstring>
 #include "comms.h"
 #include "commands.h"
-#include "pid.h"
 #include "control.h"
 #include "imu.h"
 #include "motor.h"
@@ -65,13 +64,8 @@ const int THROTTLE_CHANGE_THRESHOLD = 30; // units change to consider throttle m
 // IMU constants
 const float GYRO_SCALE = 131.0; // LSB/°/s for ±250°/s
 const float rad_to_deg = 180.0 / PI;
-const float VERTICAL_ACC_GAIN = 20.0f; // throttle units per m/s^2
-
 bool failsafe_enable = 1;
 bool isArmed = 0;
-
-bool enableFilters = false; // Enable or disable filters
-bool enableQuadFilters = false;
 
 const char *DRONE_ID = "DrongazeA1";
 const uint32_t PACKET_MAGIC = 0xA1B2C3D4;
@@ -100,10 +94,6 @@ unsigned long tipoverStart = 0;
 QueueHandle_t buzzerQueue = nullptr;
 int lastThrottle = THROTTLE_MIN;
 static volatile bool imuZeroRequested = false;
-
-// Legacy PID controllers retained for OLED tuning interface (unused)
-PIDController pitchPID, rollPID, yawPID;
-PIDController verticalAccelPID(VERTICAL_ACC_GAIN, 0.0, 5.0);
 
 // ==================== COMMUNICATION FUNCTIONS ====================
 // Time in ms before we consider the controller disconnected
@@ -637,10 +627,10 @@ void FastTask(void *pvParameters) {
         lastThrottle = currentCommand.throttle;
         ControlOutputs ctrlOut{};
         if (stabilizationEnabled) {
-            computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                               pitch, roll, yaw,
-                               IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                               IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+            Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                                        pitch, roll, yaw,
+                                        IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                                        IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
             rollCorrection = ctrlOut.roll;
             pitchCorrection = ctrlOut.pitch;
             yawCorrection = ctrlOut.yaw;
@@ -718,6 +708,7 @@ void setup()
 {
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
+    Control::init();
     if (BUZZER_PIN >= 0) {
         // Use a standard 2 kHz buzzer tone with 8-bit resolution to avoid
         // disturbing the motor PWM timers.
@@ -787,10 +778,10 @@ void setup()
     lastThrottle = startupCommand.throttle;
     ControlOutputs ctrlOut{};
     if (stabilizationEnabled) {
-        computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                           pitch, roll, yaw,
-                           IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                           IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+        Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                                    pitch, roll, yaw,
+                                    IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                                    IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
         rollCorrection = ctrlOut.roll;
         pitchCorrection = ctrlOut.pitch;
         yawCorrection = ctrlOut.yaw;
