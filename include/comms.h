@@ -36,7 +36,8 @@ struct IdentityMessage {
     uint8_t mac[6];
 } __attribute__((packed));
 
-void init(const char *ssid, const char *password, int tcpPort);
+bool init(const char *ssid, const char *password, int tcpPort);
+bool init(const char *ssid, const char *password, int tcpPort, esp_now_recv_cb_t recvCallback);
 bool receiveCommand(ThrustCommand &cmd);
 bool paired();
 extern const uint8_t BroadcastMac[6];

@@ -2,26 +2,26 @@
 
 namespace Motor {
 
-// Use timer-based PWM outputs for each motor at 50 Hz with 1–2 ms pulses.
-static ESC escFL(0);
-static ESC escFR(0);
-static ESC escBL(0);
-static ESC escBR(0);
+// One ESC per MCPWM generator: 0A/0B/1A/1B.
+static ESC escFL(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, 50);
+static ESC escFR(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, 50);
+static ESC escBL(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_A, 50);
+static ESC escBR(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, 50);
 
 void calibrate()
 {
-    // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
-    escFL.writeMicroseconds(0); escFR.writeMicroseconds(0);
-    escBL.writeMicroseconds(0); escBR.writeMicroseconds(0);
-    delay(3000);
+    // // hold motors disarmed (<1 ms) for 3 s to ensure props are removed
+    // escFL.writeMicrosecondsUnconstrained(0); escFR.writeMicrosecondsUnconstrained(0);
+    // escBL.writeMicrosecondsUnconstrained(0); escBR.writeMicrosecondsUnconstrained(0);
+    // delay(5000);
+    // escFL.writeMicroseconds(2000); escFR.writeMicroseconds(2000);
+    // escBL.writeMicroseconds(2000); escBR.writeMicroseconds(2000);
+    // delay(2000);
 
-    // standard ESC calibration: max then min throttle
-    escFL.writeMicroseconds(2000); escFR.writeMicroseconds(2000);
-    escBL.writeMicroseconds(2000); escBR.writeMicroseconds(2000);
-    delay(1000);
-    escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
-    escBL.writeMicroseconds(1000); escBR.writeMicroseconds(1000);
-    delay(2000);
+    // // standard ESC calibration: max then min throttle
+    // escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
+    // escBL.writeMicroseconds(1000); escBR.writeMicroseconds(1000);
+    // delay(3000);
 }
 
 void Outputs::constrainAll() {
@@ -31,12 +31,17 @@ void Outputs::constrainAll() {
     MBR = constrain(MBR, 1000, 2000);
 }
 
-void init(int pinFL, int pinFR, int pinBL, int pinBR, int pwmRes) {
-    escFL = ESC(pinFL);
-    escFR = ESC(pinFR);
-    escBL = ESC(pinBL);
-    escBR = ESC(pinBR);
-    escFL.attach(); escFR.attach(); escBL.attach(); escBR.attach();
+// Attach ESCs to their pins and start the MCPWM timers.
+bool init(int pinFL, int pinFR, int pinBL, int pinBR) {
+    escFL = ESC(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_A, pinFL);
+    escFR = ESC(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_GEN_B, pinFR);
+    escBL = ESC(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_A, pinBL);
+    escBR = ESC(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_GEN_B, pinBR);
+
+    return escFL.attach()
+        && escFR.attach()
+        && escBL.attach()
+        && escBR.attach();
 }
 
 int ease(int current, int target) {
@@ -53,22 +58,23 @@ void mix(int base, int pitchCorr, int rollCorr, int yawCorr, Outputs &target) {
     target.constrainAll();
 }
 
-void update(bool isArmed, Outputs &current, const Outputs &target) {
-    if (isArmed) {
+// Ramp each motor toward its target when armed.
+// Otherwise, send a neutral pulse to keep ESCs disarmed.
+void update(bool armed, Outputs &current, const Outputs &target) {
+    if (armed) {
         current.MFL = ease(current.MFL, target.MFL);
         current.MFR = ease(current.MFR, target.MFR);
         current.MBL = ease(current.MBL, target.MBL);
         current.MBR = ease(current.MBR, target.MBR);
-        escFL.writeMicroseconds(current.MFL);
-        escFR.writeMicroseconds(current.MFR);
-        escBL.writeMicroseconds(current.MBL);
-        escBR.writeMicroseconds(current.MBR);
     } else {
-        escFL.writeMicroseconds(1000);
-        escFR.writeMicroseconds(1000);
-        escBL.writeMicroseconds(1000);
-        escBR.writeMicroseconds(1000);
+        current = Outputs{1000, 1000, 1000, 1000};
     }
+
+    escFL.writeMicroseconds(current.MFL);
+    escFR.writeMicroseconds(current.MFR);
+    escBL.writeMicroseconds(current.MBL);
+    escBR.writeMicroseconds(current.MBR);
 }
+
 }
 

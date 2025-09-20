@@ -74,8 +74,8 @@ void update() {
     float worldZ = cos(rollRad)*cos(pitchRad)*az_ms2 +
                    sin(rollRad)*cos(pitchRad)*ay_ms2 -
                    sin(pitchRad)*ax_ms2;
-    // Flip sign so positive values correspond to upward acceleration.
-    g_verticalAcc = -(worldZ - 9.81f) - verticalAccOffset;
+    // Positive values correspond to upward acceleration.
+    g_verticalAcc = (worldZ - 9.81f) - verticalAccOffset;
 }
 
 void zero() {
@@ -102,6 +102,25 @@ void zero() {
 
     // Run one more update so that g_* values reflect the new offsets.
     update();
+}
+
+void applyOffsetFromCurrent() {
+    // Assume update() has been called recently so that the filtered
+    // angles represent the current craft attitude. Rebase the offsets
+    // to treat the latest orientation as the new zero without any
+    // lengthy calibration cycle.
+    rollOffset = rollSlow;
+    pitchOffset = pitchSlow;
+    yawOffset = yawSlow;
+
+    // g_verticalAcc represents (worldZ - 9.81f) - verticalAccOffset.
+    // Adjust the stored offset so that the current reading becomes
+    // zeroed, then clear the cached value for immediate feedback.
+    verticalAccOffset = g_verticalAcc + verticalAccOffset;
+    g_roll = 0;
+    g_pitch = 0;
+    g_yaw = 0;
+    g_verticalAcc = 0;
 }
 
 float pitch() { return g_pitch; }

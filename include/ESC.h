@@ -1,30 +1,25 @@
 #pragma once
 #include <Arduino.h>
-#include <esp_timer.h>
+#include <driver/mcpwm.h>
 
 /*
- * ESC driver using high‑resolution timer interrupts.
- * Generates a 50 Hz PWM signal with 1–2 ms pulse width by
- * toggling the output pin in esp_timer callbacks. Sub‑1 ms
- * pulses are allowed for disarming and calibration routines.
+ * ESC driver using the ESP32 MCPWM hardware timers for stable 50 Hz output.
+ * Each instance controls one MCPWM generator to produce 1–2 ms pulses
+ * required by standard RC ESCs. Sub-1 ms pulses are permitted for
+ * disarming and calibration.
  */
-
 class ESC {
 public:
-    explicit ESC(int pin, uint32_t freq = 50);
+    ESC(mcpwm_unit_t unit, mcpwm_timer_t timer, mcpwm_generator_t gen,
+        int pin, uint32_t freq = 50);
     bool attach();
-    void arm(int pulse = 1000);
     void writeMicroseconds(int pulse); // constrained to 900–2000 µs
-    uint32_t frequency() const;
+    void writeMicrosecondsUnconstrained(int pulse);
 
 private:
-    static void onPeriod(void *arg);
-    static void onOff(void *arg);
-
+    mcpwm_unit_t _unit;
+    mcpwm_timer_t _timer;
+    mcpwm_generator_t _gen;
     int _pin;
     uint32_t _freq;
-    esp_timer_handle_t _periodic;
-    esp_timer_handle_t _offTimer;
-    volatile uint32_t _pulse;
 };
-
