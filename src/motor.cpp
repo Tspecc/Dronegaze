@@ -21,7 +21,7 @@ void calibrate()
     delay(1000);
     escFL.writeMicroseconds(1000); escFR.writeMicroseconds(1000);
     escBL.writeMicroseconds(1000); escBR.writeMicroseconds(1000);
-    delay(1000);
+    delay(2000);
 }
 
 void Outputs::constrainAll() {
