@@ -92,6 +92,12 @@ bool stabilizationEnabled = true;
 unsigned long lastTelemetry = 0;
 unsigned long tipoverStart = 0;
 QueueHandle_t buzzerQueue = nullptr;
+constexpr size_t COMMAND_BUFFER_SIZE = sizeof(((Comms::CommandPacket*)nullptr)->command);
+struct QueuedCommand { char text[COMMAND_BUFFER_SIZE]; };
+QueueHandle_t commandQueue = nullptr;
+constexpr uint8_t kAllAxesMask = static_cast<uint8_t>((1U << Control::AXIS_COUNT) - 1U);
+constexpr uint8_t kStabilizationGlobalBit = 0x80;
+uint8_t stabilizationUserMask = kAllAxesMask;
 int lastThrottle = THROTTLE_MIN;
 static volatile bool imuZeroRequested = false;
 
@@ -200,6 +206,70 @@ static inline void setLastCommandTimeMsFromISR(uint32_t value)
     portENTER_CRITICAL_ISR(&commsStateMux);
     lastCommandTimeMs = value;
     portEXIT_CRITICAL_ISR(&commsStateMux);
+}
+
+void sendCommandFeedback(const String &line)
+{
+    if (line.length() == 0) {
+        return;
+    }
+
+    LinkStateSnapshot snapshot = loadLinkStateSnapshot();
+    auto isValidMac = [](const uint8_t *mac) -> bool {
+        if (!mac) {
+            return false;
+        }
+        for (int i = 0; i < 6; ++i) {
+            if (mac[i] != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto sendTo = [&](const uint8_t *mac) {
+        if (!isValidMac(mac)) {
+            return;
+        }
+
+        Comms::CommandPacket packet{};
+        packet.header.version = Comms::COMMAND_PROTOCOL_VERSION;
+        packet.header.type = Comms::MessageType::MSG_COMMAND;
+        strncpy(packet.header.id.deviceType, "drone", sizeof(packet.header.id.deviceType) - 1);
+        strncpy(packet.header.id.platform, "Dronegaze", sizeof(packet.header.id.platform) - 1);
+        strncpy(packet.header.id.customId, DRONE_ID, sizeof(packet.header.id.customId) - 1);
+        memcpy(packet.header.id.mac, selfMac, sizeof(packet.header.id.mac));
+        packet.header.reserved = 0;
+
+        const char *data = line.c_str();
+        size_t remaining = line.length();
+        size_t offset = 0;
+        while (remaining > 0) {
+            memset(packet.command, 0, sizeof(packet.command));
+            size_t chunk = remaining;
+            if (chunk > sizeof(packet.command) - 1) {
+                chunk = sizeof(packet.command) - 1;
+            }
+            memcpy(packet.command, data + offset, chunk);
+            packet.command[chunk] = '\0';
+            packet.header.monotonicMs = millis();
+            esp_err_t err = esp_now_send(mac, reinterpret_cast<const uint8_t*>(&packet), sizeof(packet));
+            if (err != ESP_OK) {
+                Serial.print("WARN: Failed to send ESP-NOW command reply: ");
+                Serial.println(err);
+                break;
+            }
+            offset += chunk;
+            remaining -= chunk;
+        }
+    };
+
+    if (snapshot.ilitePaired) {
+        sendTo(snapshot.iliteMac);
+    }
+    if (snapshot.commandPeerSet && (!snapshot.ilitePaired || memcmp(snapshot.commandPeer, snapshot.iliteMac, 6) != 0)) {
+        sendTo(snapshot.commandPeer);
+    }
 }
 
 static inline void setIlitePeerFromISR(const uint8_t *mac)
@@ -317,12 +387,20 @@ void streamTelemetry()
     LinkStateSnapshot linkState = loadLinkStateSnapshot();
     uint32_t commandAge = (linkState.lastCommandTimeMs > 0) ? (millis() - linkState.lastCommandTimeMs) : 0;
 
+    uint8_t stabilizationMask = Control::axisMask();
+    if (stabilizationEnabled) {
+        stabilizationMask |= kStabilizationGlobalBit;
+    }
+
     Comms::TelemetryPacket packet = {
         PACKET_MAGIC,
         pitch, roll, yaw,
         pitchCorrection, rollCorrection, yawCorrection,
+        verticalCorrection,
         (uint16_t)currentCommand.throttle,
         currentCommand.pitchAngle, currentCommand.rollAngle, currentCommand.yawAngle,
+        stabilizationMask,
+        {0, 0, 0},
         IMU::verticalAcc(),
         commandAge
     };
@@ -476,9 +554,69 @@ void onReceive(const uint8_t *mac, const uint8_t *incomingData, int len)
 
         return;
     }
+    if (len >= sizeof(Comms::CommandPacket))
+    {
+        Comms::CommandPacket packet{};
+        memcpy(&packet, incomingData, sizeof(packet));
+        if (packet.header.type == Comms::MessageType::MSG_COMMAND &&
+            packet.header.version == Comms::COMMAND_PROTOCOL_VERSION)
+        {
+            QueuedCommand queued{};
+            size_t copyLen = strnlen(packet.command, sizeof(packet.command));
+            if (copyLen >= sizeof(queued.text)) {
+                copyLen = sizeof(queued.text) - 1;
+            }
+            memcpy(queued.text, packet.command, copyLen);
+            queued.text[copyLen] = '\0';
+            if (commandQueue)
+            {
+                BaseType_t taskWoken = pdFALSE;
+                xQueueSendFromISR(commandQueue, &queued, &taskWoken);
+                if (taskWoken == pdTRUE)
+                {
+                    portYIELD_FROM_ISR();
+                }
+            }
+            uint32_t nowMs = xTaskGetTickCountFromISR() * portTICK_PERIOD_MS;
+            setLastCommandTimeMsFromISR(nowMs);
+            updateCommandPeerFromISR(mac);
+        }
+        return;
+    }
 
     if (len == sizeof(Comms::ThrustCommand))
     {
+        Comms::ThrustCommand incoming;
+        memcpy(&incoming, incomingData, sizeof(incoming));
+
+        // Ignore commands from unknown devices or with wrong magic
+        uint8_t pairedMac[6];
+        bool paired = copyIliteMacFromISR(pairedMac);
+        if (!paired || memcmp(mac, pairedMac, 6) != 0 || incoming.magic != PACKET_MAGIC)
+        {
+            return;
+        }
+
+        storeCommandSnapshotFromISR(incoming);
+        uint32_t nowMs = xTaskGetTickCountFromISR() * portTICK_PERIOD_MS;
+        setLastCommandTimeMsFromISR(nowMs);
+
+        bool peerChanged = updateCommandPeerFromISR(mac);
+        if (peerChanged)
+        {
+            esp_now_peer_info_t peerInfo = {};
+            memcpy(peerInfo.peer_addr, mac, 6);
+            peerInfo.channel = 0;
+            peerInfo.encrypt = false;
+            if (!esp_now_is_peer_exist(mac))
+            {
+                esp_now_add_peer(&peerInfo);
+            }
+        }
+    }
+}
+
+void checkFailsafe() {
         Comms::ThrustCommand incoming;
         memcpy(&incoming, incomingData, sizeof(incoming));
 
@@ -626,28 +764,31 @@ void FastTask(void *pvParameters) {
                               currentCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
         lastThrottle = currentCommand.throttle;
         ControlOutputs ctrlOut{};
-        if (stabilizationEnabled) {
-            Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                                        pitch, roll, yaw,
-                                        IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                                        IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
-            rollCorrection = ctrlOut.roll;
-            pitchCorrection = ctrlOut.pitch;
-            yawCorrection = ctrlOut.yaw;
-            verticalCorrection = ctrlOut.vertical;
+        Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                                    pitch, roll, yaw,
+                                    IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                                    IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+
+        const bool rollAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Roll);
+        const bool pitchAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Pitch);
+        const bool yawAxisEnabled = stabilizationEnabled && Control::axisEnabled(Control::Axis::Yaw);
+        const bool yawActive = yawAxisEnabled && yawControlEnabled;
+        const bool verticalAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Vertical);
+
+        rollCorrection = rollAxisActive ? ctrlOut.roll : 0.0f;
+        pitchCorrection = pitchAxisActive ? ctrlOut.pitch : 0.0f;
+        yawCorrection = yawActive ? ctrlOut.yaw : 0.0f;
+        verticalCorrection = verticalAxisActive ? ctrlOut.vertical : 0.0f;
+
+        int base = constrain(currentCommand.throttle, THROTTLE_MIN, THROTTLE_MAX);
+        if (verticalAxisActive) {
+            base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
         } else {
-            rollCorrection = 0.0f;
-            pitchCorrection = 0.0f;
-            yawCorrection = 0.0f;
             verticalCorrection = 0.0f;
         }
-        int base = constrain(currentCommand.throttle, THROTTLE_MIN, THROTTLE_MAX);
-        if (stabilizationEnabled) {
-            base = constrain(base + verticalCorrection, THROTTLE_MIN, THROTTLE_MAX);
-        }
-        int pitchCorr = stabilizationEnabled ? constrain((int)pitchCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
-        int rollCorr = stabilizationEnabled ? constrain((int)rollCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
-        int yawCorr = stabilizationEnabled ? constrain((int)yawCorrection, -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
+        int pitchCorr = pitchAxisActive ? constrain(static_cast<int>(pitchCorrection), -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
+        int rollCorr = rollAxisActive ? constrain(static_cast<int>(rollCorrection), -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
+        int yawCorr = yawActive ? constrain(static_cast<int>(yawCorrection), -CORRECTION_LIMIT, CORRECTION_LIMIT) : 0;
         if (base <= THROTTLE_MIN) {
             pitchCorr = 0;
             rollCorr = 0;
@@ -665,6 +806,12 @@ void CommTask(void *pvParameters) {
     while (true) {
         handleIncomingData();
         monitorConnection();
+        if (commandQueue) {
+            QueuedCommand queued;
+            while (xQueueReceive(commandQueue, &queued, 0) == pdTRUE) {
+                Commands::handleCommand(String(queued.text));
+            }
+        }
         LinkStateSnapshot state = loadLinkStateSnapshot();
         if (!state.ilitePaired && millis() - lastDiscoveryTime > 1000) {
             Comms::IdentityMessage msg = {};
@@ -709,6 +856,11 @@ void setup()
     Serial.begin(115200);
     Serial.println("Flight Controller Starting...");
     Control::init();
+    Control::setAxisMask(stabilizationUserMask);
+    commandQueue = xQueueCreate(8, sizeof(QueuedCommand));
+    if (!commandQueue) {
+        Serial.println("WARN: Command queue allocation failed");
+    }
     if (BUZZER_PIN >= 0) {
         // Use a standard 2 kHz buzzer tone with 8-bit resolution to avoid
         // disturbing the motor PWM timers.
@@ -777,21 +929,21 @@ void setup()
                           startupCommand.throttle > THROTTLE_MIN + THROTTLE_CHANGE_THRESHOLD;
     lastThrottle = startupCommand.throttle;
     ControlOutputs ctrlOut{};
-    if (stabilizationEnabled) {
-        Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
-                                    pitch, roll, yaw,
-                                    IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
-                                    IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
-        rollCorrection = ctrlOut.roll;
-        pitchCorrection = ctrlOut.pitch;
-        yawCorrection = ctrlOut.yaw;
-        verticalCorrection = ctrlOut.vertical;
-    } else {
-        rollCorrection = 0.0f;
-        pitchCorrection = 0.0f;
-        yawCorrection = 0.0f;
-        verticalCorrection = 0.0f;
-    }
+    Control::computeCorrections(pitchSetpoint, rollSetpoint, yawSetpoint,
+                                pitch, roll, yaw,
+                                IMU::gyroX(), IMU::gyroY(), IMU::gyroZ(),
+                                IMU::verticalAcc(), throttleStable, yawControlEnabled, ctrlOut);
+
+    const bool rollAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Roll);
+    const bool pitchAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Pitch);
+    const bool yawAxisEnabled = stabilizationEnabled && Control::axisEnabled(Control::Axis::Yaw);
+    const bool yawActive = yawAxisEnabled && yawControlEnabled;
+    const bool verticalAxisActive = stabilizationEnabled && Control::axisEnabled(Control::Axis::Vertical);
+
+    rollCorrection = rollAxisActive ? ctrlOut.roll : 0.0f;
+    pitchCorrection = pitchAxisActive ? ctrlOut.pitch : 0.0f;
+    yawCorrection = yawActive ? ctrlOut.yaw : 0.0f;
+    verticalCorrection = verticalAxisActive ? ctrlOut.vertical : 0.0f;
 
     CREATE_TASK(
         FastTask,

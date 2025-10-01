@@ -23,6 +23,8 @@ struct Gains {
     float kd;
 };
 
+constexpr size_t AXIS_COUNT = 4;
+
 void init();
 
 void computeCorrections(float pitchSetpoint,
@@ -54,6 +56,11 @@ void resetGains();
 
 float filterAlpha();
 void setFilterAlpha(float alpha);
+
+uint8_t axisMask();
+void setAxisEnabled(Axis axis, bool enabled);
+bool axisEnabled(Axis axis);
+void setAxisMask(uint8_t mask);
 
 float quadFilterAlpha();
 void setQuadFilterAlpha(float alpha);

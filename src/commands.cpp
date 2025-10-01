@@ -17,7 +17,9 @@ extern bool isArmed;
 extern Motor::Outputs currentOutputs;
 extern Motor::Outputs targetOutputs;
 extern bool stabilizationEnabled;
+extern uint8_t stabilizationUserMask;
 extern bool requestIMUZero();
+extern void sendCommandFeedback(const String &line);
 
 static bool parseAxisToken(const String &token, Control::Axis &axis) {
     if (token.equalsIgnoreCase("roll")) {
@@ -57,6 +59,7 @@ void sendLine(const String &line) {
         client.println(line);
         client.flush();
     }
+    sendCommandFeedback(line);
 }
 
 static unsigned long lastHeartbeat = 0;
@@ -231,10 +234,88 @@ void handleCommand(const String &cmd) {
         sendLine("ACK: Motors disarmed");
     } else if (trimmed.equalsIgnoreCase("stabilization on")) {
         stabilizationEnabled = true;
+        Control::setAxisMask(stabilizationUserMask);
         sendLine("ACK: Stabilization enabled");
     } else if (trimmed.equalsIgnoreCase("stabilization off")) {
         stabilizationEnabled = false;
+        Control::setAxisMask(0);
         sendLine("ACK: Stabilization disabled");
+    } else if (trimmed.equalsIgnoreCase("stabilization status")) {
+        uint8_t mask = Control::axisMask();
+        sendLine(String("Stabilization: ") + (stabilizationEnabled ? "ON" : "OFF"));
+        String axes = "Axes roll:";
+        axes += ((mask & 0x01) ? "ON" : "OFF");
+        axes += " pitch:";
+        axes += ((mask & 0x02) ? "ON" : "OFF");
+        axes += " yaw:";
+        axes += ((mask & 0x04) ? "ON" : "OFF");
+        axes += " vertical:";
+        axes += ((mask & 0x08) ? "ON" : "OFF");
+        sendLine(axes);
+        if (!stabilizationEnabled) {
+            String pending = "Pending roll:";
+            pending += ((stabilizationUserMask & 0x01) ? "ON" : "OFF");
+            pending += " pitch:";
+            pending += ((stabilizationUserMask & 0x02) ? "ON" : "OFF");
+            pending += " yaw:";
+            pending += ((stabilizationUserMask & 0x04) ? "ON" : "OFF");
+            pending += " vertical:";
+            pending += ((stabilizationUserMask & 0x08) ? "ON" : "OFF");
+            sendLine(pending);
+        }
+    } else if (trimmed.startsWith("stabilization axis ")) {
+        String rest = trimmed.substring(19);
+        rest.trim();
+        int spaceIdx = rest.indexOf(' ');
+        if (spaceIdx < 0) {
+            sendLine("ERROR: Usage stabilization axis <axis|all> <on|off>");
+        } else {
+            String axisToken = rest.substring(0, spaceIdx);
+            String stateToken = rest.substring(spaceIdx + 1);
+            stateToken.trim();
+            bool enable = false;
+            if (stateToken.equalsIgnoreCase("on")) {
+                enable = true;
+            } else if (stateToken.equalsIgnoreCase("off")) {
+                enable = false;
+            } else {
+                sendLine("ERROR: State must be 'on' or 'off'");
+                return;
+            }
+
+            if (axisToken.equalsIgnoreCase("all")) {
+                uint8_t mask = enable ? static_cast<uint8_t>((1U << Control::AXIS_COUNT) - 1U) : 0U;
+                stabilizationUserMask = mask;
+                if (stabilizationEnabled) {
+                    Control::setAxisMask(mask);
+                }
+                String response = String("ACK: Stabilization axes ") + (enable ? "enabled" : "disabled");
+                if (!stabilizationEnabled) {
+                    response += " (pending)";
+                }
+                sendLine(response);
+            } else {
+                Control::Axis axis;
+                if (!parseAxisToken(axisToken, axis)) {
+                    sendLine("ERROR: Unknown axis; use roll, pitch, yaw, or vertical");
+                } else {
+                    const uint8_t bit = static_cast<uint8_t>(1U << static_cast<size_t>(axis));
+                    if (enable) {
+                        stabilizationUserMask |= bit;
+                    } else {
+                        stabilizationUserMask &= static_cast<uint8_t>(~bit);
+                    }
+                    if (stabilizationEnabled) {
+                        Control::setAxisEnabled(axis, enable);
+                    }
+                    String response = String("ACK: ") + axisName(axis) + " axis " + (enable ? "enabled" : "disabled");
+                    if (!stabilizationEnabled) {
+                        response += " (pending)";
+                    }
+                    sendLine(response);
+                }
+            }
+        }
     } else {
         sendLine("ERROR: Unknown command");
     }

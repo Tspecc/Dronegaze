@@ -7,7 +7,7 @@
 namespace {
 
 constexpr uint32_t CONFIG_MAGIC = 0x434E544C; // "CNTL"
-constexpr size_t AXIS_COUNT = 4;
+constexpr size_t kAxisCount = Control::kAxisCount;
 constexpr float DEFAULT_FILTER_ALPHA = 0.25f;
 constexpr float DEFAULT_QUAD_ALPHA = 0.1f;
 constexpr size_t STORAGE_SIZE = 128;
@@ -59,7 +59,7 @@ struct LowPassFilter {
     }
 };
 
-const Control::Gains kDefaultGains[AXIS_COUNT] = {
+const Control::Gains kDefaultGains[kAxisCount] = {
     {4.0f, 0.0f, 0.1f},   // Roll
     {4.0f, 0.0f, 0.1f},   // Pitch
     {4.0f, 0.0f, 0.1f},   // Yaw
@@ -83,8 +83,9 @@ PIDController g_pitchPID;
 PIDController g_yawPID;
 PIDController g_verticalPID;
 
-std::array<LowPassFilter, AXIS_COUNT> g_stage1Filters{};
-std::array<LowPassFilter, AXIS_COUNT> g_stage2Filters{};
+std::array<LowPassFilter, kAxisCount> g_stage1Filters{};
+std::array<LowPassFilter, kAxisCount> g_stage2Filters{};
+std::array<bool, Control::AXIS_COUNT> g_axisEnabled{{true, true, true, true}};
 
 bool g_storageReady = false;
 bool g_initialized = false;
@@ -144,6 +145,23 @@ void resetAxisFilters(Control::Axis axis) {
     const size_t idx = axisIndex(axis);
     g_stage1Filters[idx].reset();
     g_stage2Filters[idx].reset();
+}
+
+void resetAxisController(Control::Axis axis) {
+    switch (axis) {
+        case Control::Axis::Roll:
+            g_rollPID.reset();
+            break;
+        case Control::Axis::Pitch:
+            g_pitchPID.reset();
+            break;
+        case Control::Axis::Yaw:
+            g_yawPID.reset();
+            break;
+        case Control::Axis::Vertical:
+            g_verticalPID.reset();
+            break;
+    }
 }
 
 ConfigBlob toBlob() {
@@ -258,56 +276,101 @@ void computeCorrections(float pitchSetpoint,
                         ControlOutputs &out) {
     out.roll = out.pitch = out.yaw = out.vertical = 0.0f;
 
+    const bool rollAxisEnabled = g_axisEnabled[axisIndex(Axis::Roll)];
+    const bool pitchAxisEnabled = g_axisEnabled[axisIndex(Axis::Pitch)];
+    const bool yawAxisEnabled = g_axisEnabled[axisIndex(Axis::Yaw)];
+    const bool verticalAxisEnabled = g_axisEnabled[axisIndex(Axis::Vertical)];
+
     const float rollError = rollSetpoint - roll;
     const float pitchError = pitchSetpoint - pitch;
     float yawError = yawSetpoint - yaw;
     if (yawError > 180.0f) yawError -= 360.0f;
     else if (yawError < -180.0f) yawError += 360.0f;
 
-    const float filteredRollError = applyFilters(Axis::Roll, rollError);
-    const float filteredPitchError = applyFilters(Axis::Pitch, pitchError);
+    float filteredRollError = 0.0f;
+    if (rollAxisEnabled) {
+        filteredRollError = applyFilters(Axis::Roll, rollError);
+    } else {
+        resetAxisFilters(Axis::Roll);
+        resetAxisController(Axis::Roll);
+    }
 
+    float filteredPitchError = 0.0f;
+    if (pitchAxisEnabled) {
+        filteredPitchError = applyFilters(Axis::Pitch, pitchError);
+    } else {
+        resetAxisFilters(Axis::Pitch);
+        resetAxisController(Axis::Pitch);
+    }
+
+    const bool yawActive = yawAxisEnabled && yawEnabled;
     float filteredYawError = 0.0f;
-    if (yawEnabled) {
+    if (yawActive) {
         filteredYawError = applyFilters(Axis::Yaw, yawError);
     } else {
         resetAxisFilters(Axis::Yaw);
+        resetAxisController(Axis::Yaw);
     }
 
+    const bool verticalActive = verticalAxisEnabled && throttleStable;
     float filteredVerticalError = 0.0f;
-    if (throttleStable) {
+    if (verticalActive) {
         const float verticalError = -verticalAcc;
         filteredVerticalError = applyFilters(Axis::Vertical, verticalError);
     } else {
         resetAxisFilters(Axis::Vertical);
+        resetAxisController(Axis::Vertical);
     }
 
     if (g_config.pidEnabled) {
         const float dt = computeDt();
-        out.roll = g_rollPID.compute(filteredRollError, dt);
-        out.pitch = g_pitchPID.compute(filteredPitchError, dt);
-        if (yawEnabled) {
+        if (rollAxisEnabled) {
+            out.roll = g_rollPID.compute(filteredRollError, dt);
+        } else {
+            g_rollPID.reset();
+            out.roll = 0.0f;
+        }
+
+        if (pitchAxisEnabled) {
+            out.pitch = g_pitchPID.compute(filteredPitchError, dt);
+        } else {
+            g_pitchPID.reset();
+            out.pitch = 0.0f;
+        }
+
+        if (yawActive) {
             out.yaw = g_yawPID.compute(filteredYawError, dt);
         } else {
             g_yawPID.reset();
             out.yaw = 0.0f;
         }
 
-        if (throttleStable) {
+        if (verticalActive) {
             out.vertical = g_verticalPID.compute(filteredVerticalError, dt);
         } else {
             g_verticalPID.reset();
             out.vertical = 0.0f;
         }
     } else {
-        out.roll = g_config.roll.kp * filteredRollError - g_config.roll.kd * gyroX;
-        out.pitch = g_config.pitch.kp * filteredPitchError - g_config.pitch.kd * gyroY;
-        if (yawEnabled) {
+        if (rollAxisEnabled) {
+            out.roll = g_config.roll.kp * filteredRollError - g_config.roll.kd * gyroX;
+        } else {
+            out.roll = 0.0f;
+        }
+
+        if (pitchAxisEnabled) {
+            out.pitch = g_config.pitch.kp * filteredPitchError - g_config.pitch.kd * gyroY;
+        } else {
+            out.pitch = 0.0f;
+        }
+
+        if (yawActive) {
             out.yaw = g_config.yaw.kp * filteredYawError - g_config.yaw.kd * gyroZ;
         } else {
             out.yaw = 0.0f;
         }
-        if (throttleStable) {
+
+        if (verticalActive) {
             out.vertical = g_config.vertical.kp * filteredVerticalError;
         } else {
             out.vertical = 0.0f;
@@ -397,6 +460,37 @@ void setFilterAlpha(float alpha) {
     g_config.filterAlpha = alpha;
     resetFilters();
     persistConfig();
+}
+
+uint8_t axisMask() {
+    uint8_t mask = 0;
+    for (size_t i = 0; i < Control::AXIS_COUNT; ++i) {
+        if (g_axisEnabled[i]) {
+            mask |= static_cast<uint8_t>(1U << i);
+        }
+    }
+    return mask;
+}
+
+void setAxisEnabled(Axis axis, bool enabled) {
+    const size_t idx = axisIndex(axis);
+    if (g_axisEnabled[idx] == enabled) {
+        return;
+    }
+    g_axisEnabled[idx] = enabled;
+    resetAxisFilters(axis);
+    resetAxisController(axis);
+}
+
+bool axisEnabled(Axis axis) {
+    return g_axisEnabled[axisIndex(axis)];
+}
+
+void setAxisMask(uint8_t mask) {
+    for (size_t i = 0; i < Control::AXIS_COUNT; ++i) {
+        const bool enabled = (mask & (1U << i)) != 0;
+        setAxisEnabled(static_cast<Axis>(i), enabled);
+    }
 }
 
 float quadFilterAlpha() {
